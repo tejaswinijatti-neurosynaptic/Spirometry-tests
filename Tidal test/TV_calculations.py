@@ -1,3 +1,11 @@
+"""
+TV_fromlog.py  (no argparse)
+
+How to use:
+1) Set FILE below to your .log path.
+2) Optionally tweak DT/DEADBAND/TAIL_IGNORE and filter/baseline params.
+3) Run:  python TV_fromlog.py
+"""
 
 from __future__ import annotations
 from collections import deque
@@ -27,8 +35,8 @@ PLOT = True
 
 #Coefficients
 # 4-term basis coefficients (pull=inhale, push=exhale)
-pull_coefficients = np.array([ 0.176201, -0.000513, -0.111826,  0.045253, -0.045253], dtype=float)  # inhale/pull
-push_coefficients = np.array([-0.498273,  0.004855,  1.690918, -0.943883, -0.943883], dtype=float)  # exhale/push
+pull_coefficients = np.array([ 0.334646, -0.001808, -0.526989,  0.498103], dtype=float)  # inhale/pull
+push_coefficients = np.array([ 1.21753e-01,  2.10000e-05,  7.26680e-02, -1.59643e-01], dtype=float)  # exhale/push
 #for device = f039
 
 #Parsing
@@ -168,11 +176,10 @@ def basis_from_filtered(pf: np.ndarray) -> np.ndarray:
     a = np.abs(p)
     s = np.sign(p)
     return np.column_stack([
-        s * np.sqrt(a),    # turbulent (Bernoulli) component
-        p,                # laminar component
-        s * a ** (1/3),    # mid-range correction
+        s * np.sqrt(a),
+        p,
+        s * np.cbrt(a),
         s,
-        np.ones_like(p),
     ])
 
 # Main compute
@@ -262,6 +269,9 @@ def run_one(file_path: str):
     else:
         print("Exhale peaks:  none")
     print(f"\nFinal TV: {TV:.3f} L  ({tv_note})")
+    true_volume = 3
+    error = (true_volume - abs(TV))*100/true_volume
+    print(f"Percentage error compared to true volume of {true_volume} L: {error:.2f} %")
 
     # 5) plot with shaded inhale/exhale regions
     if PLOT and len(p_corr) > 0:
@@ -300,5 +310,4 @@ def run_one(file_path: str):
 # ------------------------------ ENTRY POINT ------------------------------- #
 if __name__ == "__main__":
     run_one(FILE)
-
 
