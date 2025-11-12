@@ -26,10 +26,10 @@ pressure_queue = queue.Queue()
 pressures_pa = deque(maxlen=6000)
 baseline_pressure = 0
 
-# Coefficients (device f039)
+#Coefficients
 # 4-term basis coefficients (pull=inhale, push=exhale)
-pull_coefficients = np.array([ 0.334646, -0.001808, -0.526989,  0.498103], dtype=float)  # inhale/pull
-push_coefficients = np.array([ 1.21753e-01,  2.10000e-05,  7.26680e-02, -1.59643e-01], dtype=float)  # exhale/push
+pull_coefficients = np.array([ 0.176201, -0.000513, -0.111826,  0.045253, -0.045253], dtype=float)  # inhale/pull
+push_coefficients = np.array([-0.498273,  0.004855,  1.690918, -0.943883, -0.943883], dtype=float)  # exhale/push
 
 # --- NEW: knobs ---
 USE_DEADBAND = True
@@ -210,10 +210,11 @@ def basis_from_filtered(pf: np.ndarray) -> np.ndarray:
     a = np.abs(p)
     s = np.sign(p)
     return np.column_stack([
-        s * np.sqrt(a),
-        p,
-        s * np.cbrt(a),
+        s * np.sqrt(a),    # turbulent (Bernoulli) component
+        p,                # laminar component
+        s * a ** (1/3),    # mid-range correction
         s,
+        np.ones_like(p),
     ])
 
 # Per-sample model choice (no segments): push if pf>=0 else pull
