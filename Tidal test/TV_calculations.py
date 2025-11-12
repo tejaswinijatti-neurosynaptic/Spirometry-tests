@@ -262,9 +262,6 @@ def run_one(file_path: str):
     else:
         print("Exhale peaks:  none")
     print(f"\nFinal TV: {TV:.3f} L  ({tv_note})")
-    true_volume = 3
-    error = (true_volume - abs(TV))*100/true_volume
-    print(f"Percentage error compared to true volume of {true_volume} L: {error:.2f} %")
 
     # 5) plot with shaded inhale/exhale regions
     if PLOT and len(p_corr) > 0:
@@ -303,4 +300,5 @@ def run_one(file_path: str):
 # ------------------------------ ENTRY POINT ------------------------------- #
 if __name__ == "__main__":
     run_one(FILE)
+
 
