@@ -17,6 +17,12 @@ last_data_time = None
 end_of_test_reported = False
 IDLE_TIMEOUT_SEC = 1.0  # seconds to wait before auto-close
 
+# near other globals / top of file
+SESSION_MAX_SEC = 20   # stop accepting data after this many seconds (from first sample)
+client_should_stop = False   # set True to request websocket stop from the UI thread
+ws_conn = None                # will hold websocket object reference (best-effort)
+session_end_time = None       # computed once start_time is known
+
 uri = "ws://localhost:8444/bleWS/"
 
 # Shared queue for thread-safe communication between websocket and plot
@@ -134,8 +140,10 @@ def decode_pressure_from_message(message):
 
 # 🔌 WebSocket listener running in a background thread
 async def ws_listener():
+    global ws_conn, client_should_stop
     try:
         async with websockets.connect(uri) as websocket:
+            ws_conn = websocket
             print("WebSocket connection established.")
             await websocket.send("BleAppletInit")
             print("Sent: BleAppletInit")
@@ -143,9 +151,18 @@ async def ws_listener():
             await websocket.send("startScanFromHtml~60")
             print("Sent: startScanFromHtml~60")
 
-            # open the file once, keep it open for the session
             with open(LOG_FILE, "a", buffering=1, encoding="utf-8") as f:
                 async for message in websocket:
+                    # check if main thread asked us to stop the session
+                    if client_should_stop:
+                        try:
+                            # polite stop command (vendor specific — harmless if unsupported)
+                            await websocket.send("stopScanFromHtml")
+                        except Exception:
+                            pass
+                        print("[ws_listener] client requested stop — closing ws.")
+                        break
+
                     # log everything exactly as received
                     f.write(message.strip() + "\n")
 
@@ -159,8 +176,10 @@ async def ws_listener():
         print(f"WebSocket connection failed: {e}")
     except Exception as e:
         print(f"An error occurred in the WebSocket listener: {e}")
+    finally:
+        ws_conn = None
 
-LOG_FILE = r"d:\Users\Tejaswini\Desktop\neurosyn\live plotting\New method\realtime_all\forced1.log"
+LOG_FILE = r"d:\Users\Tejaswini\Desktop\neurosyn\live plotting\New method\realtime_all\f044_forced2.log"
 os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
 
 def start_ws_thread():
@@ -243,7 +262,7 @@ ax_p.set_xlabel("Time (s)")
 ax_p.set_ylabel("Pressure (Pa)")
 ax_p.set_title("Real-time Pressure (Pa)")
 ax_p.grid(True, alpha=0.3)
-ax_p.set_xlim(0, 26)
+ax_p.set_xlim(0, 20)
 ax_p.set_ylim(-5000, 5000)
 
 # Right axes config (Volume–Flow loop) — limits set directly here
@@ -259,14 +278,17 @@ ax_vt.set_xlabel("Time (s)")
 ax_vt.set_ylabel("Volume (L)")
 ax_vt.set_title("Real-time Volume–Time")
 ax_vt.grid(True, alpha=0.3)
-ax_vt.set_xlim(0, 26)
+ax_vt.set_xlim(0, 20)
 ax_vt.set_ylim(-6, 6.0)
+
+start_time = None      # will be set when the first sample arrives
+MAX_RUNTIME = 20      # seconds to auto-stop the realtime plot
 
 # 🔁 Animation update
 def update(_):
-    global last_data_time, end_of_test_reported  #declare both
-    WINDOW_SEC = 26  # seconds shown on x-axis
-    # ingest new pressure samples
+    global last_data_time, end_of_test_reported, start_time, session_end_time, client_should_stop
+    WINDOW_SEC = 26
+    # ingest new pressure samples...
     got_new = False
     while True:
         try:
@@ -275,6 +297,11 @@ def update(_):
             break
         pressures_pa.append(val)
         got_new = True
+
+    if start_time is None and got_new:
+        start_time = time.time()
+        session_end_time = start_time + SESSION_MAX_SEC
+        print(f"[Realtime] Session started. Will stop accepting data at {session_end_time} (epoch).")
 
     if not pressures_pa:
         return line_p, line_fv
@@ -317,9 +344,23 @@ def update(_):
         print("[Realtime] No new data — closing plot and running analysis…")
 
         # schedule the figure to close so plt.show() returns cleanly
-        timer = fig.canvas.new_timer(interval=100)  # close in 0.1 s
-        timer.add_callback(lambda: plt.close(fig))
-        timer.start()
+                # stop the animation and close safely using a Python timer
+        try:
+            if 'ani' in globals() and hasattr(ani, 'event_source'):
+                ani.event_source.stop()
+        except Exception:
+            pass
+
+        def _safe_close():
+            try:
+                plt.close(fig)
+            except Exception:
+                pass
+
+        threading.Timer(0.1, _safe_close).start()
+
+        return line_p, line_fv, line_vt
+
 
     # --- RIGHT: Volume–Flow loop ---
     # Convert filtered pressure -> flow (per-sample push/pull), integrate -> volume
@@ -435,7 +476,53 @@ def update(_):
     else:
         line_vt.set_data([], [])
 
-    return line_p, line_fv, line_vt
+        if session_end_time is not None and not end_of_test_reported:
+            now = time.time()
+            if now >= session_end_time:
+                end_of_test_reported = True
+                print(f"[Realtime] Session time reached {SESSION_MAX_SEC}s — stopping data collection and closing plot.")
+                # signal ws_listener to stop reading / close gracefully
+                client_should_stop = True
+
+                try:
+                    if 'ani' in globals() and hasattr(ani, 'event_source'):
+                        ani.event_source.stop()
+                except Exception:
+                    pass
+
+                def _safe_close():
+                    try:
+                        plt.close(fig)
+                    except Exception:
+                        pass
+
+                threading.Timer(0.1, _safe_close).start()
+
+        # ADD THIS NEW BLOCK HERE: (around line 465, inside update function)
+    if session_end_time is not None and not end_of_test_reported:
+        now = time.time()
+        if now >= session_end_time:
+            end_of_test_reported = True
+            print(f"[Realtime] Session time reached {SESSION_MAX_SEC}s — stopping data collection and closing plot.")
+            # signal ws_listener to stop reading / close gracefully
+            client_should_stop = True
+
+            try:
+                if 'ani' in globals() and hasattr(ani, 'event_source'):
+                    ani.event_source.stop()
+            except Exception:
+                pass
+
+            def _safe_close():
+                try:
+                    plt.close(fig)
+                except Exception:
+                    pass
+
+            threading.Timer(0.1, _safe_close).start()
+            0
+            return line_p, line_fv, line_vt
+
 
 
 ani = FuncAnimation(fig, update, interval=50, blit=False)
@@ -452,8 +539,8 @@ try:
 
     # load forced_calculations.py from same folder (exec as module)
     here = os.path.abspath(os.path.dirname(__file__))
-    analysis_path = os.path.join(here, "forced_calculations.py")
-    spec = importlib.util.spec_from_file_location("forced_calculations", analysis_path)
+    analysis_path = os.path.join(here, "forced_calculations_2plots.py") 
+    spec = importlib.util.spec_from_file_location("forced_calculations_2plots", analysis_path)
     fa = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(fa)
 
