@@ -8,10 +8,10 @@ How to use:
 
 This version FINISHES the pipeline by:
 - Detecting inhale/exhale segments on filtered pressure
-- Converting pressure -> flow using your 4-term model (separate push/pull coeffs)
+- Converting pressure -> flow using your 5-term model (separate push/pull coeffs)
 - Integrating flow to volume
 - Plotting Flow–Volume loops (per-segment and combined)
-- Plotting time-series (pressure, flow, volume) with segment overlays
+- Plotting cumulative volume-time graph
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ import matplotlib.pyplot as plt
 
 # USER SETTINGS 
 # EDIT THIS TO THE LOG FILE
-FILE = r"d:\Users\Tejaswini\Desktop\neurosyn\live plotting\New method\realtime_all\f084_forced2.log"
+FILE = r"d:\Users\Tejaswini\Downloads\f066_forced1.log"
 
 # Sampling period (seconds). 0.005 = 200 Hz
 DT = 0.005
@@ -335,6 +335,10 @@ def plot_flow_volume(flow: np.ndarray, vol: np.ndarray,
     ax2.set_xlabel("Volume")
     ax2.set_ylabel("Flow")
     ax2.set_title(f"Flow–Volume Loop (combined)")
+    ax2.set_xticks(np.arange(-6, 6, 1))
+    ax2.set_yticks(np.arange(-10, 14, 2))
+    ax2.set_xlim([-6, 6])
+    ax2.set_ylim([-10, 14])
     ax2.grid(True, alpha=0.3)
 
     return fig2
@@ -360,8 +364,19 @@ def compute_exhale_metrics(flow: np.ndarray, vol: np.ndarray, starts: np.ndarray
         exhale_candidates.append((i, s, e, fvc_i))
 
     if not exhale_candidates:
-        return dict(valid=False,
-                message="No valid exhale detected. Please blow forcefully into the device.")
+        return dict(
+            FVC=np.nan,
+            FEV1=np.nan,
+            FEV1_FVC=np.nan,
+            seg_index=-1,
+            Exlen=0,
+            ErrNum=9,
+            s_best=-1,
+            e_best=-1,
+            s_on=-1,
+            valid=False,
+            message="No valid exhale detected. Please blow forcefully into the device."
+        )
 
     # choose segment with largest FVC
     i_best, s_best, e_best, _ = max(exhale_candidates, key=lambda t: t[3])
@@ -378,20 +393,20 @@ def compute_exhale_metrics(flow: np.ndarray, vol: np.ndarray, starts: np.ndarray
 
     v_on = vol[s_on:e_best+1] - vol[s_on]
     Exlen = int(e_best - s_on + 1)
-    FVC = float(v_on[-1]) if v_on.size else -1.0
+    FVC = float(v_on[-1]) if v_on.size else np.nan
 
     idx_1s = int(round(1.0 / dt))
     if Exlen > idx_1s and v_on.size > idx_1s:
         FEV1 = float(v_on[idx_1s])
         err = 0
     else:
-        FEV1 = -1.0
+        FEV1 = np.nan
         err = 7
 
     if FVC > 0 and FEV1 > 0:
         FEV1_FVC = float((FEV1 / FVC) * 100.0)
     else:
-        FEV1_FVC = -1.0
+        FEV1_FVC = np.nan
         if err == 0:
             err = 8
 
@@ -402,9 +417,9 @@ def compute_exhale_metrics(flow: np.ndarray, vol: np.ndarray, starts: np.ndarray
 
 def compute_additional_metrics(flow: np.ndarray, vol: np.ndarray, starts: np.ndarray, ends: np.ndarray, dt: float,
                                 base_metrics: dict):
-    out = dict(FEF25=-1.0, FEF50=-1.0, FEF75=-1.0, PEF=-1.0, FEF25_75=-1.0,
-               FET=-1.0, PIF=-1.0, TLC=-1.0, RV=-1.0, VC=-1.0, FIVC=-1.0)
-
+    out = dict(FEF25=np.nan , FEF50=np.nan, FEF75=np.nan, PEF=np.nan, FEF25_75=np.nan,
+               FET=np.nan, PIF=np.nan, TLC=np.nan, RV=np.nan, VC=np.nan, FIVC=np.nan)
+    
     if base_metrics.get('seg_index', -1) < 0:
         return out
 
@@ -441,7 +456,7 @@ def compute_additional_metrics(flow: np.ndarray, vol: np.ndarray, starts: np.nda
     # FEF25-75 (mean)
     if i25 >= 0 and i75 > i25:
         slab = ex_flow[i25:i75+1]
-        out['FEF25_75'] = float(np.nanmean(slab)) if slab.size else -1.0
+        out['FEF25_75'] = float(np.nanmean(slab)) if slab.size else np.nan
 
     # FET
     out['FET'] = float((e_best - s_on + 1) * dt)
@@ -464,20 +479,19 @@ def compute_additional_metrics(flow: np.ndarray, vol: np.ndarray, starts: np.nda
     win_end = e_in if next_inhale_idx >= 0 else e_best
     vseg = vol[s_on:win_end+1]
     if vseg.size:
-        v_min = float(np.nanmin(vseg))  # far-left end (RV, possibly negative)
-        v_max = float(np.nanmax(vseg))  # far-right end (TLC)
+        v_min = float(np.nanmin(vseg))  # most negative (RV side)
+        v_max = float(np.nanmax(vseg))  # most positive (TLC side)
 
-        out['RV']  = abs(v_min)         # per your rule: abs(RV)
-        out['TLC'] = v_max+(v_max+abs(v_min))              # far-right end
-        out['VC']  = out['TLC'] - out['RV']  # VC = TLC - abs(RV)
+        out['RV']  = abs(v_min)     # report RV as positive magnitude
+        out['TLC'] = v_max          # far-right end
+        out['VC']  = out['TLC'] - out['RV']  # VC = TLC - RV
 
-    #print(f"printing v_min and v_max{v_min, v_max, (v_max+abs(v_min)) }")
     # FIVC (keep as before or recompute if you prefer a different definition)
     if next_inhale_idx >= 0:
         # magnitude of inhaled volume in that next inhale segment
         in_flow = flow[s_in:e_in+1]
         in_vol = -(np.cumsum(in_flow) * dt)
-        out['FIVC'] = float(in_vol[-1]) if in_vol.size else -1.0
+        out['FIVC'] = float(in_vol[-1]) if in_vol.size else np.nan
 
     return out
 
@@ -525,7 +539,7 @@ def main():
     # now per-segment pressure->flow but only for segments that exceed deadband
     flow = pressure_to_flow_segments(pf, starts, ends, min_peak_pa=SEGMENT_PEAK_DEADBAND_PA)
 
-    # optional: compute baseline from quiet region then subtract if you do that later
+    #compute baseline from quiet region then subtract if you do that later
     flow_baseline = float(np.median(flow[:2000])) if flow.size >= 2000 else float(np.median(flow))
     flow_baseline_removed = flow - flow_baseline
     print(f"Flow baseline removed: {flow_baseline:.6f} L/s")
@@ -557,7 +571,7 @@ def main():
         segments = []   # clean list start
         FLOW_MIN_THRESHOLD = 0.2   # L/s  (your requirement)
         for idx, (s, e) in enumerate(zip(starts, ends), start=1):
-            seg_flow = flow[s:e+1]
+            seg_flow = flow[s:e+1] - flow[s]  # zeroed flow for segment
             seg_vol  = vol[s:e+1]
             if seg_flow.size == 0:
                 continue
@@ -593,37 +607,30 @@ def main():
         # tuning: how much pre-start to use to estimate baseline flow (ms -> samples)
         PRE_START_BASELINE_MS = 50
         pre_samples = max(1, int(round((PRE_START_BASELINE_MS / 1000.0) / DT)))
-
+        volume_offset = None  # shared for all selected segments in this maneuver
+        baseline_flow = float(np.median(flow[:2000])) if flow.size >= 2000 else float(np.median(flow))
+        
         for i in wanted_zero_based:
             if 0 <= i < len(segments):
                 seg = segments[i]
                 s = seg["start"]
                 e = seg["end"]
 
-                seg_v = seg["vol"].astype(float)   # keep absolute volume (no x-zeroing)
-                seg_f = seg["flow"].astype(float)  # original flow
+                seg_v_abs = seg["vol"].astype(float)   # absolute volume from integration
+                seg_f     = seg["flow"].astype(float)
 
-                # estimate baseline from a short window BEFORE the segment start if available,
-                # otherwise use the first few samples of the segment
-                if s - pre_samples >= 0:
-                    baseline_win = flow[s - pre_samples : s]
-                    if baseline_win.size:
-                        baseline_flow = float(np.nanmedian(baseline_win))
-                    else:
-                        baseline_flow = float(np.nanmedian(seg_f[:min(3, seg_f.size)]))
-                else:
-                    baseline_flow = float(np.nanmedian(seg_f[:min(3, seg_f.size)]))
-
-                # subtract that baseline so flow near the start is referenced to quiet
+                # ---- FLOW: subtract only baseline, no per-seg zeroing ----
+                # (you already computed baseline_flow earlier)
                 seg_f_plot = seg_f - baseline_flow
 
-                # enforce exact zero at the first plotted sample (guarantees segment starts at 0 L/s)
-                # (this only affects the plotted copy; underlying seg_f stays unchanged)
-                if seg_f_plot.size:
-                    seg_f_plot = seg_f_plot - float(seg_f_plot[0])
+                # ---- VOLUME: one shared offset so exhale starts at 0 ----
+                if volume_offset is None:
+                    # define offset from *first* selected segment (your exhale)
+                    volume_offset = seg_v_abs[0]
 
-                # append to plotting arrays (keep NaN separators so segments are not joined)
-                sel_v.extend(seg_v.tolist())
+                seg_v_plot = seg_v_abs - volume_offset   # both exhale & inhale use SAME offset
+
+                sel_v.extend(seg_v_plot.tolist())
                 sel_f.extend(seg_f_plot.tolist())
                 sel_v.append(np.nan); sel_f.append(np.nan)
             else:
@@ -634,6 +641,10 @@ def main():
         ax_fv.set_xlabel("Volume (L)", fontsize=10)
         ax_fv.set_ylabel("Flow (L/s)", fontsize=10)
         ax_fv.set_title("Flow–Volume Loop — selected segments", fontsize=11)
+        ax_fv.set_xlim([-6, 6])
+        ax_fv.set_ylim([-10, 14])
+        ax_fv.set_xticks(np.arange(-6, 6, 1))
+        ax_fv.set_yticks(np.arange(-10, 14, 2))
         ax_fv.grid(True, alpha=0.3)
 
         if len(sel_v):
@@ -642,21 +653,10 @@ def main():
             for j, n in enumerate(wanted_zero_based):
                 if 0 <= n < len(segments):
                     seg = segments[n]
-                    # show marker at real absolute volume and the zeroed flow (which is 0)
-                    x0 = float(seg['vol'][0])
-                    y0 = 0.0
-                    ax_fv.scatter(x0, y0, s=30, zorder=5)
-                    ax_fv.annotate(seg['name'], xy=(x0, y0),
-                                  xytext=(6 + 16*(j%2), 6 + 8*(j%2)), textcoords='offset points', fontsize=8)
             ax_fv.legend(loc='upper right', fontsize=8)
         else:
             ax_fv.text(0.5, 0.5, "No selected segments to plot", ha='center', va='center', transform=ax_fv.transAxes)
 
-        # optional: keep aspect so loop looks sane
-        try:
-            ax_fv.set_aspect(0.5, adjustable='box')
-        except Exception:
-            pass
 
         # --- Exhaled Volume vs Time (MIDDLE: ax_evs) ---
         if metrics["s_best"] >= 0 and metrics["e_best"] >= 0:
@@ -671,6 +671,9 @@ def main():
             ax_evs.set_xlabel("Time (s)", fontsize=10)
             ax_evs.set_ylabel("Volume (L)", fontsize=10)
             ax_evs.set_title("Exhaled Volume vs Time (Main Exhale)", fontsize=11)
+            ax_evs.set_xticks(np.arange(0, 13, 1))
+            ax_evs.set_yticks(np.arange(0, 8, 1))
+            ax_evs.grid(True, alpha=0.3)
 
             idx_1s = int(round(1.0 / DT))
             if len(t_exhale) > idx_1s:
@@ -685,47 +688,54 @@ def main():
         ax_metrics.axis('off') # Hide axes for a clean text box
         
         # Prepare text content
+        def fmt_or_na(x, fmt="{:.3f}"):
+            return "NA" if np.isnan(x) else fmt.format(x)
+
+        def getm(key):
+            return extra.get(key, np.nan)
+
         # FVC/FEV1 Block
         text_lines = [f"File: {os.path.basename(FILE)}"]
         text_lines.append("\n-- Main Metrics --")
-        text_lines.append(f"FVC = {metrics['FVC']:.3f} L")
+        text_lines.append(f"FVC = {fmt_or_na(metrics['FVC'])} L")
         if metrics["ErrNum"] == 9:
-            text_lines.append("FEV1 = -1 (No Exhale)")
-            text_lines.append("FEV1% = -1")
+            text_lines.append("FEV1 = NA (No Exhale)")
+            text_lines.append("FEV1% = NA")
         else:
             if metrics["ErrNum"] == 7:
-                text_lines.append("FEV1 = -1 (Seg < 1s)")
+                text_lines.append("FEV1 = NA (Invalid)")
             else:
-                text_lines.append(f"FEV1 = {metrics['FEV1']:.3f} L")
+                text_lines.append(f"FEV1 = {fmt_or_na(metrics['FEV1'])} L")
             if metrics["FEV1_FVC"] > 0:
-                text_lines.append(f"FEV1% = {metrics['FEV1_FVC']:.1f} %")
+                text_lines.append(f"FEV1/FVC% = {fmt_or_na(metrics['FEV1_FVC'])} %")
             else:
-                text_lines.append("FEV1% = -1 (Invalid)")
+                text_lines.append("FEV1/FVC% = NA (Invalid)")
         
-        # FEFs/PEF Block
+        # -- Flow Rates --
         text_lines.append("\n-- Flow Rates --")
-        text_lines.append(f"PEF = {extra.get('PEF', -1):.3f} L/s")
-        text_lines.append(f"PIF = {extra.get('PIF', -1):.3f} L/s")
-        text_lines.append(f"FEF25 = {extra.get('FEF25', -1):.3f} L/s")
-        text_lines.append(f"FEF50 = {extra.get('FEF50', -1):.3f} L/s")
-        text_lines.append(f"FEF75 = {extra.get('FEF75', -1):.3f} L/s")
-        text_lines.append(f"FEF25-75 = {extra.get('FEF25_75', -1):.3f} L/s")
-        text_lines.append(f"FET = {extra.get('FET', -1):.2f} s")
-        
-        # Volume Capacity Block
+        text_lines.append(f"PEF = {fmt_or_na(getm('PEF'))} L/s")
+        text_lines.append(f"PIF = {fmt_or_na(getm('PIF'))} L/s")
+        text_lines.append(f"FEF25 = {fmt_or_na(getm('FEF25'))} L/s")
+        text_lines.append(f"FEF50 = {fmt_or_na(getm('FEF50'))} L/s")
+        text_lines.append(f"FEF75 = {fmt_or_na(getm('FEF75'))} L/s")
+        text_lines.append(f"FEF25-75 = {fmt_or_na(getm('FEF25_75'))} L/s")
+        text_lines.append(f"FET = {fmt_or_na(getm('FET'), fmt='{:.2f}')} s")
+
+        # -- Capacity --
         text_lines.append("\n-- Capacity --")
-        text_lines.append(f"VC = {extra.get('VC', -1):.3f} L")
-        text_lines.append(f"TLC = {extra.get('TLC', -1):.3f} L")
-        text_lines.append(f"RV = {extra.get('RV', -1):.3f} L")
-        text_lines.append(f"FIVC = {extra.get('FIVC', -1):.3f} L")
-        
-        # Display the text
-        text_content = "\n".join(text_lines).replace("-1.000", "-1").replace("-1.0", "-1")
-        ax_metrics.text(0.05, 0.95, text_content, 
-                        transform=ax_metrics.transAxes, 
-                        fontsize=10, 
-                        verticalalignment='top',
-                        family='monospace')
+        text_lines.append(f"VC = {fmt_or_na(getm('VC'))} L")
+        text_lines.append(f"TLC = {fmt_or_na(getm('TLC'))} L")
+        text_lines.append(f"RV = {fmt_or_na(getm('RV'))} L")
+        text_lines.append(f"FIVC = {fmt_or_na(getm('FIVC'))} L")
+
+        text_content = "\n".join(text_lines)
+        ax_metrics.text(
+            0.05, 0.95, text_content,
+            transform=ax_metrics.transAxes,
+            fontsize=10,
+            verticalalignment='top',
+            family='monospace',
+        )
 
 
         # Final layout tweaks
@@ -749,47 +759,52 @@ def main():
     metrics = compute_exhale_metrics(flow, vol, starts, ends, DT)
     FVC = metrics["FVC"]; FEV1 = metrics["FEV1"]; FEV1_FVC = metrics["FEV1_FVC"]
 
+    
     # Additional parameters
     extra = compute_additional_metrics(flow, vol, starts, ends, DT, metrics)
     # Print block
-    print(f"FVC = {FVC:.6f}")
+    def fmt_or_na(x, fmt="{:.6f}"):
+        return "NA" if np.isnan(x) else fmt.format(x)
+
+    print(f"FVC = {fmt_or_na(FVC)} L")
+
     if metrics["ErrNum"] == 9:
-        print("FEV1 = -1  (no exhale segment)")
-        print("FEV1/FVC = -1  (no exhale segment)")
+        print("FEV1 = NA  (no exhale segment)")
+        print("FEV1/FVC = NA  (no exhale segment)")
     else:
         if metrics["ErrNum"] == 7:
-            print("FEV1 = -1  (segment shorter than 1s)")
+            print("FEV1 = NA  (segment shorter than 1s)")
         else:
-            print(f"FEV1 = {FEV1:.6f}")
-        if FEV1_FVC > 0:
-            print(f"FEV1/FVC = {FEV1_FVC:.3f} %")
+            print(f"FEV1 = {fmt_or_na(FEV1)} L")
+
+        if np.isnan(FEV1_FVC):
+            print("FEV1/FVC = NA  (FEV1/FVC invalid)")
         else:
-            print("FEV1/FVC = -1  (FEV1/FVC invalid)")
+            print(f"FEV1/FVC = {fmt_or_na(FEV1_FVC, fmt='{:.3f}')} %")
+
 
     # FEFs and PEF
     if extra:
-        if extra.get('FEF25') != -1: print(f"FEF25 = {extra['FEF25']:.6f}")
-        else: print("FEF25 = -1")
-        if extra.get('FEF50') != -1: print(f"FEF50 = {extra['FEF50']:.6f}")
-        else: print("FEF50 = -1")
-        if extra.get('FEF75') != -1: print(f"FEF75 = {extra['FEF75']:.6f}")
-        else: print("FEF75 = -1")
-        if extra.get('FEF25_75') != -1: print(f"FEF25_75 = {extra['FEF25_75']:.6f}")
-        else: print("FEF25_75 = -1")
-        if extra.get('PEF') != -1: print(f"PEF = {extra['PEF']:.6f}")
-        else: print("PEF = -1")
-        if extra.get('FET') != -1: print(f"FET = {extra['FET']:.3f} s")
-        else: print("FET = -1")
-        if extra.get('PIF') != -1: print(f"PIF = {extra['PIF']:.6f}")
-        else: print("PIF = -1")
-        if extra.get('TLC') != -1: print(f"TLC = {extra['TLC']:.6f}")
-        else: print("TLC = -1")
-        if extra.get('RV') != -1: print(f"RV = {extra['RV']:.6f}")
-        else: print("RV = -1")
-        if extra.get('VC') != -1: print(f"VC = {extra['VC']:.6f}")
-        else: print("VC = -1")
-        if extra.get('FIVC') != -1: print(f"FIVC = {extra['FIVC']:.6f}")
-        else: print("FIVC = -1")
+        def print_metric(key, label=None, fmt="{:.6f}", suffix=""):
+            if label is None:
+                label = key
+            val = extra.get(key, np.nan)
+            if not np.isnan(val):
+                print(f"{label} = {fmt.format(val)}{suffix}")
+            else:
+                print(f"{label} = NA{suffix}")
+
+        print_metric("FEF25")
+        print_metric("FEF50")
+        print_metric("FEF75")
+        print_metric("FEF25_75", label="FEF25_75")
+        print_metric("PEF")
+        print_metric("FET", fmt="{:.3f}", suffix=" s")
+        print_metric("PIF")
+        print_metric("TLC")
+        print_metric("RV")
+        print_metric("VC")
+        print_metric("FIVC")
 
     # 7) Print simple summary
     #print(f"Decoded samples (raw): {p_raw.size}")
