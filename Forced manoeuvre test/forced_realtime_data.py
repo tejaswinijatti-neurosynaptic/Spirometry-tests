@@ -12,6 +12,7 @@ import os
 import re
 import os, time, importlib.util
 from datetime import datetime
+import winsound
 
 last_data_time = None
 end_of_test_reported = False
@@ -80,63 +81,131 @@ vt_t_hist: list[float]  = []   # all times (rolling)
 vt_vol_hist: list[float] = []  # all volumes (rolling)
 vt_last_pf_len = 0             # processed length
 
+DT = 1/200                      
+# ==== Exhale timer (visual cue) ====
+EXHALE_START_Pressure = 50       # L/s to *start* timer (exhale begins)
+EXHALE_END_Pressure   = -50        # L/s below this we *consider* end-phase
+EXHALE_END_HOLD_SAMPLES  = 50       # consecutive -ve pressure for end
+EXHALE_START_HOLD_SAMPLES = 10      # consecutive +ve pressure for start
+MIN_EXHALE_TIME_BEFORE_STOP = 1.0  # s: don't end timer before 1 second
 
+exhale_timer_running     = False
+exhale_timer_done        = False
+exhale_end_hold_count    = 0 # counts negative pressure samples (for end)
+exhale_start_walltime    = None
+exhale_last_duration_sec = 0.0
+exhale_start_press_count = 0 # counts positive pressure samples (for start)
+
+def play_start_beep():
+    winsound.Beep(1400, 250)  # short beep
+
+def play_long_beep():
+    winsound.Beep(2000, 1400)  # long beep
+
+# ---- audio state for cues ----
+SHORT_BEEP_INTERVAL = 1.0      # seconds between short beeps during exhale
+
+beep_start_played      = False
+long_beep_played       = False
+seven_sec_beep_played   = False
 
 # 🧮 Pressure conversion helper
+import re
+
+# configuration (tweak these)
+INITIAL_WINDOW_FRAMES = 10   # only apply special skipping for the first N frames
+MAX_SPECIAL_TO_SEPARATE = 5  # collect/skip at most M special frames at the start
+
+def is_special_frame_bytes(b):
+    """
+    Heuristic to detect your Frame A vs Frame B.
+    Observations from your examples:
+      - header bytes [0..5] are common
+      - Frame A has b[6] == 0x00 while Frame B had b[6] == 0x01
+      - Frame A payload contains many zero bytes shortly after header in the sample region
+    Heuristic used here:
+      - require length >= 120 (your header guard)
+      - b[6] == 0x00 AND the number of zero bytes in the payload region (7..106) is high
+    This is intentionally conservative; adjust thresholds if you see false positives/negatives.
+    """
+    if len(b) < 120:
+        return False
+    # quick discriminant seen in examples
+    if b[6] != 0x00:
+        return False
+    # count zeros in the main payload area (exclude header/trailer)
+    payload = b[7:107]
+    zero_count = sum(1 for x in payload if x == 0)
+    # threshold: >60% zeros in payload (you can lower or raise this)
+    return zero_count >= int(0.60 * len(payload))
+
+import re
+
 def decode_pressure_from_message(message):
     """
-    Parse 'spirodata~[AA:BB:...:ZZ]' into pressures (Pa).
-    Frame-level gating baked in:
-      - Skip the first *all-zero* frame entirely.
-      - Skip the very next frame (second) as well.
-      - Then decode normally.
+    Decodes pressure. 
+    Includes a 'Startup Gate' that nukes the first 10 'Frame A' types
+    (identified by byte[6] == 0x00).
     """
+    # 1. Regex Parse
     m = re.search(r'\[([0-9A-Fa-f:]+)\]', message)
     if not m:
         return []
 
-    # Parse bytes
     try:
         b = [int(t, 16) & 0xFF for t in m.group(1).split(':')]
     except ValueError:
         return []
 
-    # Header guard + bounds: require S(83), H(72), F(70) at [0],[1],[119]
+    # 2. Basic Sanity/Header Check
+    # Must start with S (83), H (72) and end with F (70)
+    # Frame A and B BOTH pass this, so we check this first to filter total garbage.
     if len(b) <= 119 or b[0] != 83 or b[1] != 72 or b[119] != 70:
         return []
 
-    # --- Frame-level skip logic (kept inside the function) ---
-    state = getattr(decode_pressure_from_message, "_skip_state", 0)  # 0: wait null, 1: skip next, 2: normal
-    is_null = all(v == 0 for v in b)
+    #3. STARTUP GATE
+    # Initialize a static counter if it doesn't exist
+    if not hasattr(decode_pressure_from_message, "_frame_a_skip_count"):
+        decode_pressure_from_message._frame_a_skip_count = 0
 
-    if state == 0:
-        if is_null:
-            decode_pressure_from_message._skip_state = 1  # next frame will be skipped
-            return []
-        # no null seen yet → pass through
-    elif state == 1:
-        decode_pressure_from_message._skip_state = 2  # done skipping
+    # DIFFERENTIATOR: Check byte 6-13. 
+    # Frame A has 0x00. Frame B has 0x01.
+    grabage_frame = (b[i] == 0 for i in range(7,14)) 
+
+    # Logic: If it's Frame A, AND we haven't skipped 10 of them yet... YEET IT.
+    if grabage_frame and decode_pressure_from_message._frame_a_skip_count < 5:
+        decode_pressure_from_message._frame_a_skip_count += 1
+        print(f"DEBUG: Ignored Frame #{decode_pressure_from_message._frame_a_skip_count}")
         return []
-    # state == 2 → normal
 
+    # --- 4. DECODE ---
     # ADC/pressure conversion
     OS_dig = 2**23
     FSS_inH2O = 120.0
     INH2O_TO_PA = 249.089
 
     out = []
-    i = 7  # skip 7-byte header
+    i = 7  # skip header
     while i < 107 and (i + 4) < len(b):
         b2 = b[i+2] & 0xFF
         b1 = b[i+3] & 0xFF
         b0 = b[i+4] & 0xFF
         decimal_count = (b2 << 16) | (b1 << 8) | b0
+        
+        # Avoid division by zero if calc gets weird, though unlikely with these constants
         p_inH2O = 1.25 * ((decimal_count - OS_dig) / (2**24)) * FSS_inH2O
         out.append(p_inH2O * INH2O_TO_PA)
         i += 5
 
-    # IMPORTANT: do NOT drop first two samples here—frames are already gated
     return out
+
+# small helper to inspect stored initial special frames later
+def get_initial_special_frames():
+    s = getattr(decode_pressure_from_message, "_state", None)
+    if not s:
+        return []
+    return s["initial_special_frames"]
+
 
 # 🔌 WebSocket listener running in a background thread
 async def ws_listener():
@@ -179,7 +248,7 @@ async def ws_listener():
     finally:
         ws_conn = None
 
-LOG_FILE = r"d:\Users\Tejaswini\Desktop\neurosyn\live plotting\New method\realtime_all\f044_forced2.log"
+LOG_FILE = r"d:\Users\Tejaswini\Desktop\neurosyn\live plotting\New method\realtime_all\f008.log"
 os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
 
 def start_ws_thread():
@@ -190,7 +259,6 @@ thread = threading.Thread(target=start_ws_thread, daemon=True)
 thread.start()
 
 # ------------ Filtering + baseline (ONLY what you already use) ------------
-DT = 0.005                      # 200 Hz
 TRI_WINDOW = 20                 # triangular half-window; FIR length = 2*TRI_WINDOW - 1 (>=2)
 INIT_MEAN_N  = 200
 
@@ -249,8 +317,35 @@ def integrate_flow_to_volume(flow: np.ndarray, dt: float) -> np.ndarray:
 
 W_TRI = triangular_weights(TRI_WINDOW)
 
-# 🎨 Setup plots: LEFT = Pressure–Time, RIGHT = Volume–Flow
-fig, (ax_p, ax_fv, ax_vt) = plt.subplots(1, 3, figsize=(11.8, 5.6))
+# Setup plots
+#FIGURE + AXES LAYOUT 
+fig = plt.figure(figsize=(11.8, 5.6))
+
+# 4 columns: 3 plots + 1 narrow timer panel
+gs = fig.add_gridspec(1, 4, width_ratios=[3, 3, 3, 1], wspace=0.35)
+
+ax_p   = fig.add_subplot(gs[0, 0])  # Pressure–Time
+ax_fv  = fig.add_subplot(gs[0, 1])  # Volume–Flow
+ax_vt  = fig.add_subplot(gs[0, 2])  # Volume–Time
+ax_tim = fig.add_subplot(gs[0, 3])  # Timer panel
+
+# Timer panel styling (no ticks, just a box)
+ax_tim.set_xticks([])
+ax_tim.set_yticks([])
+ax_tim.set_facecolor("#FCFCFC")
+for spine in ax_tim.spines.values():
+    spine.set_visible(True)
+
+ax_tim.set_title("Timer", fontsize=11)
+
+timer_text = ax_tim.text(
+    0.5, 0.5, "0 s",
+    ha="center",
+    va="center",
+    fontsize=16,
+    bbox=dict(boxstyle="round,pad=0.6", facecolor="#f5f5f5", edgecolor="black")
+)
+
 line_p,  = ax_p.plot([], [], lw=1)
 line_fv, = ax_fv.plot([], [], lw=1.1, linestyle='-')  # add marker
 line_vt, = ax_vt.plot([], [], lw=1.1, color='tab:orange')  # placeholder for VT plot
@@ -321,13 +416,7 @@ def update(_):
 
     # --- LEFT: Pressure–Time
     line_p.set_data(t_f, pf)
-
-    # Sliding x-window for pressure
-    if t_f[-1] > 26:
-        ax_p.set_xlim(t_f[-1] - 26, t_f[-1])
-    else:
-        ax_p.set_xlim(0, 26)
-
+    ax_p.set_xlim(0, 20)
     ax_p.set_title(f"Real-time Pressure (Pa) — samples: {len(pressures_pa)}")
 
     # --- auto-close once data stops coming ---
@@ -366,6 +455,10 @@ def update(_):
     # Convert filtered pressure -> flow (per-sample push/pull), integrate -> volume
     global active, start_cnt, end_cnt, V_state, flow_last, vol_last
     global curr_v, curr_f, last_pf_len, below_cnt
+    global exhale_timer_running, exhale_timer_done
+    global exhale_start_walltime, exhale_last_duration_sec
+    global exhale_start_press_count, exhale_end_hold_count
+    global beep_start_played, long_beep_played, seven_sec_beep_played
 
     flow_all = pressure_to_flow_per_sample(pf)
 
@@ -378,39 +471,87 @@ def update(_):
         p_now = pf[i]
         f_now = flow_all[i]
 
-        # activation using hysteresis
+        # ===== Exhale timer logic (pressure-based) =====
+        # START: sustained positive pressure = exhale
+        if not exhale_timer_running and not exhale_timer_done:
+            if p_now >= EXHALE_START_Pressure:
+                exhale_start_press_count += 1
+                if exhale_start_press_count >= EXHALE_START_HOLD_SAMPLES:
+                    exhale_timer_running     = True
+                    exhale_start_walltime    = time.time()
+                    exhale_last_duration_sec = 0.0
+                    exhale_end_hold_count    = 0
+
+                    # reset audio state for this maneuver
+                    beep_start_played   = False
+                    long_beep_played    = False
+                    seven_sec_beep_played = False
+
+                    # START CUE: play start beep once (non-blocking)(only once per exhale)
+                    if not beep_start_played:
+                        threading.Thread(target=play_start_beep, daemon=True).start()
+                        beep_start_played = True
+
+            else:
+                # broke the positive run
+                exhale_start_press_count = 0
+
+        #END: after min exhale time, sustained negative pressure = inhale
+        elif exhale_timer_running:
+            now     = time.time()
+            elapsed = now - exhale_start_walltime if exhale_start_walltime is not None else 0.0
+
+            if elapsed >= MIN_EXHALE_TIME_BEFORE_STOP:
+                if p_now <= EXHALE_END_Pressure:
+                    exhale_end_hold_count += 1
+                    if exhale_end_hold_count >= EXHALE_END_HOLD_SAMPLES:
+                        exhale_timer_running     = False
+                        exhale_timer_done        = True
+                        exhale_last_duration_sec = elapsed
+                else:
+                    # not consistently inhale → reset end counter
+                    exhale_end_hold_count = 0
+            else:
+                # during first 1s, don't let anything stop the timer
+                exhale_end_hold_count = 0
+
+        # ===== Existing Volume–Flow state machine =====
         if active:
             if abs(p_now) < PRESS_THR_PA:
                 below_cnt += 1
             else:
                 below_cnt = 0
 
-            # allow short dropouts (zero-crossing) without ending
             if below_cnt >= max(END_HOLD, GRACE_SAMPLES):
                 active = False
                 below_cnt = 0
-                # do NOT clear buffers here; we keep the loop on-screen
+                # do NOT clear buffers here
             else:
-                # integrate and append
                 V_state += f_now * DT
                 flow_last = f_now
                 vol_last  = V_state
                 curr_v.append(vol_last)
                 curr_f.append(flow_last)
-
         else:
-            # idle → look for start hold
             if abs(p_now) >= PRESS_THR_PA:
                 start_cnt += 1
                 if start_cnt >= START_HOLD:
                     active = True
                     start_cnt = 0
-                    # starting a new maneuver: if previous loop should persist, keep buffers;
-                    # if you want a fresh curve each time, uncomment the next two lines:
-                    # curr_v, curr_f = [], []
-                    # V_state = vol_last  # or 0.0 if you prefer absolute volume from zero
+                    # reset timer per maneuver
+                    exhale_timer_running     = False
+                    exhale_timer_done        = False
+                    exhale_start_walltime    = None
+                    exhale_last_duration_sec = 0.0
+                    exhale_end_hold_count    = 0
+                    exhale_start_press_count = 0
+
+                    # reset audio per maneuver
+                    beep_start_played   = False
+                    long_beep_played    = False
             else:
                 start_cnt = 0
+
 
     # remember how far we processed
     last_pf_len = pf.size
@@ -476,35 +617,13 @@ def update(_):
     else:
         line_vt.set_data([], [])
 
-        if session_end_time is not None and not end_of_test_reported:
-            now = time.time()
-            if now >= session_end_time:
-                end_of_test_reported = True
-                print(f"[Realtime] Session time reached {SESSION_MAX_SEC}s — stopping data collection and closing plot.")
-                # signal ws_listener to stop reading / close gracefully
-                client_should_stop = True
 
-                try:
-                    if 'ani' in globals() and hasattr(ani, 'event_source'):
-                        ani.event_source.stop()
-                except Exception:
-                    pass
-
-                def _safe_close():
-                    try:
-                        plt.close(fig)
-                    except Exception:
-                        pass
-
-                threading.Timer(0.1, _safe_close).start()
-
-        # ADD THIS NEW BLOCK HERE: (around line 465, inside update function)
+        # --- session timeout handling ---
     if session_end_time is not None and not end_of_test_reported:
         now = time.time()
         if now >= session_end_time:
             end_of_test_reported = True
             print(f"[Realtime] Session time reached {SESSION_MAX_SEC}s — stopping data collection and closing plot.")
-            # signal ws_listener to stop reading / close gracefully
             client_should_stop = True
 
             try:
@@ -520,10 +639,33 @@ def update(_):
                     pass
 
             threading.Timer(0.1, _safe_close).start()
-            0
-            return line_p, line_fv, line_vt
+
+    # ===== Update Timer UI (EXHALE TIMER ONLY) =====
+    if exhale_timer_running and exhale_start_walltime is not None:
+        elapsed_exhale = time.time() - exhale_start_walltime
+        exhale_last_duration_sec = elapsed_exhale
+        timer_text.set_text(f"{int(elapsed_exhale)} s")
+
+        # === 7-second long beep ===
+        if elapsed_exhale >= 7.0 and not seven_sec_beep_played:
+            seven_sec_beep_played = True
+            threading.Thread(target=play_long_beep, daemon=True).start()
 
 
+    elif exhale_timer_done:
+        # exhale finished → freeze at final duration
+        timer_text.set_text(f"{int(exhale_last_duration_sec)} s")
+
+        # --- FINAL LONG BEEP (once per maneuver) ---
+        if not long_beep_played:
+            threading.Thread(target=play_long_beep, daemon=True).start()
+            long_beep_played = True
+
+    else:
+        # no exhale yet → show 0 s
+        timer_text.set_text("0 s")
+
+    return line_p, line_fv, line_vt
 
 ani = FuncAnimation(fig, update, interval=50, blit=False)
 plt.tight_layout()
