@@ -8,10 +8,10 @@ How to use:
 
 This version FINISHES the pipeline by:
 - Detecting inhale/exhale segments on filtered pressure
-- Converting pressure -> flow using your 5-term model (separate push/pull coeffs)
+- Converting pressure -> flow using your 4-term model (separate push/pull coeffs)
 - Integrating flow to volume
 - Plotting Flow–Volume loops (per-segment and combined)
-- Plotting cumulative volume-time graph
+- Plotting time-series (pressure, flow, volume) with segment overlays
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ import matplotlib.pyplot as plt
 
 # USER SETTINGS 
 # EDIT THIS TO THE LOG FILE
-FILE = r"d:\Users\Tejaswini\Downloads\f066_forced1.log"
+FILE = r"d:\Users\Tejaswini\Desktop\neurosyn\live plotting\New method\realtime_all\exhale_timer_testing.log"
 
 # Sampling period (seconds). 0.005 = 200 Hz
 DT = 0.005
@@ -53,13 +53,9 @@ push_coefficients = np.array([-0.498273,  0.004855,  1.690918, -0.943883, -0.943
 
 # Parsing
 def parse_log_file(file_path: str) -> np.ndarray:
-    """
-    Read one .log, extract pressure samples in Pa.
-    - Skip only the first all-zero frame
-    - Convert 24-bit counts to Pa
-    """
     pressures_pa = []
-    skipped_first_null = False
+    frame_count = 0
+    
     with open(file_path, "r", errors="ignore") as f:
         for line in f:
             a = line.find('['); b = line.find(']')
@@ -70,17 +66,20 @@ def parse_log_file(file_path: str) -> np.ndarray:
                 arr = [int(x, 16) for x in parts]
             except ValueError:
                 continue
-
-            # quick frame sanity
+            
+            # frame sanity check
             if len(arr) < 120:
                 continue
             if arr[0] != 83 or arr[1] != 72 or arr[119] != 70:
                 continue
-
-            # skip only the first all-zero payload
-            if not skipped_first_null and all(v == 0 for v in arr):
-                skipped_first_null = True
-                continue
+            
+            frame_count += 1
+            
+            # In first 5 frames, skip "Frame A" type (has zeros at bytes 7-13)
+            if frame_count <= 5:
+                # Frame A signature: bytes 7-13 are all zeros
+                if all(arr[i] == 0 for i in range(7, 14)):
+                    continue
 
             OS_dig = 2**23
             FSS_inH2O = 120.0
