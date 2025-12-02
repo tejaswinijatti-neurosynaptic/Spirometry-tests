@@ -23,7 +23,7 @@ import matplotlib.pyplot as plt
 
 # USER SETTINGS 
 # EDIT THIS TO THE LOG FILE
-FILE = r"d:\Users\Tejaswini\Desktop\neurosyn\live plotting\New method\realtime_all\exhale_timer_testing.log"
+FILE = r"d:\Users\Tejaswini\Desktop\neurosyn\live plotting\New method\realtime_all\f078.log"
 
 # Sampling period (seconds). 0.005 = 200 Hz
 DT = 0.005
@@ -417,7 +417,7 @@ def compute_exhale_metrics(flow: np.ndarray, vol: np.ndarray, starts: np.ndarray
 def compute_additional_metrics(flow: np.ndarray, vol: np.ndarray, starts: np.ndarray, ends: np.ndarray, dt: float,
                                 base_metrics: dict):
     out = dict(FEF25=np.nan , FEF50=np.nan, FEF75=np.nan, PEF=np.nan, FEF25_75=np.nan,
-               FET=np.nan, PIF=np.nan, TLC=np.nan, RV=np.nan, VC=np.nan, FIVC=np.nan)
+               FET=np.nan, PIF=np.nan, TLC=np.nan, RV=np.nan, VC=np.nan, FIVC=np.nan, BEV=np.nan)
     
     if base_metrics.get('seg_index', -1) < 0:
         return out
@@ -433,6 +433,34 @@ def compute_additional_metrics(flow: np.ndarray, vol: np.ndarray, starts: np.nda
         return out
 
     FVC = float(ex_vol[-1])
+
+    #BEV
+    # Work on the volume–time curve of this exhalation
+    bev = np.nan
+    if FVC>0 and ex_vol.size>1:
+        n = ex_vol.size
+        t_rel = np.arange(n, dtype=np.float64) * dt # t = 0 at onset, dt per sample
+        
+        # Preferred window: 5–25% of FVC (by exhaled volume)
+        v_exh = ex_vol  # already volume-from-onset
+        low = 0.05 * FVC
+        high = 0.25 * FVC
+        mask = (v_exh >= low) & (v_exh <= high)
+
+        # Fallback: first 0.15 s if 5–25% window is too small
+        if np.count_nonzero(mask) < 3:
+            mask = t_rel <= 0.15  # 150 ms
+
+        if np.count_nonzero(mask) >= 3:
+            t_sel = t_rel[mask]
+            v_sel = v_exh[mask]
+            
+            # Fit line: v ≈ a*t + b
+            a, b = np.polyfit(t_sel, v_sel, 1)
+
+            bev = float(abs(b))  # L, magnitude
+
+    out['BEV'] = bev
 
     # PEF
     out['PEF'] = float(np.nanmax(ex_flow))
@@ -726,6 +754,9 @@ def main():
         text_lines.append(f"TLC = {fmt_or_na(getm('TLC'))} L")
         text_lines.append(f"RV = {fmt_or_na(getm('RV'))} L")
         text_lines.append(f"FIVC = {fmt_or_na(getm('FIVC'))} L")
+        text_lines.append(f"BEV = {fmt_or_na(getm('BEV'))} L")
+
+         # Combine lines into single text block
 
         text_content = "\n".join(text_lines)
         ax_metrics.text(
@@ -804,6 +835,7 @@ def main():
         print_metric("RV")
         print_metric("VC")
         print_metric("FIVC")
+        print_metric("BEV")
 
     # 7) Print simple summary
     #print(f"Decoded samples (raw): {p_raw.size}")
