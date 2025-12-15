@@ -13,10 +13,12 @@ from typing import List, Iterable, Tuple
 import os
 import numpy as np
 import matplotlib.pyplot as plt
+import json
+import sys
 
 # USER SETTINGS 
 #EDIT THIS TO THE LOG FILE
-FILE = r"d:\Users\Tejaswini\Desktop\neurosyn\live plotting\New method\realtime_all\tidal1.log"
+FILE = r"d:\Users\Tejaswini\Downloads\f078_tidal1.log"
 
 # Sampling period (seconds). 0.005 = 200 Hz
 DT = 0.005
@@ -34,10 +36,28 @@ END_MEAN_N   = 150   # samples used to estimate linear drift toward tail
 PLOT = True
 
 #Coefficients
-# 4-term basis coefficients (pull=inhale, push=exhale)
-pull_coefficients = np.array([ 0.334646, -0.001808, -0.526989,  0.498103], dtype=float)  # inhale/pull
-push_coefficients = np.array([ 1.21753e-01,  2.10000e-05,  7.26680e-02, -1.59643e-01], dtype=float)  # exhale/push
-#for device = f039
+def load_coeffs(filename):
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    # Look in the 'models' subdirectory
+    file_path = os.path.join(script_dir, "models", filename)
+    
+    if not os.path.exists(file_path):
+        print(f"\nCRITICAL ERROR: Could not find '{filename}' in 'models' folder.")
+        print(f"Path searched: {file_path}")
+        sys.exit(1)
+        
+    try:
+        with open(file_path, 'r') as f:
+            data = json.load(f)
+        print(f"Loaded {filename}")
+        return np.array(data["coeffs"], dtype=float)
+    except Exception as e:
+        print(f"Error reading JSON {filename}: {e}")
+        sys.exit(1)
+
+print("Loading Coefficients")
+pull_coefficients = load_coeffs("coeffs_pull.json")
+push_coefficients = load_coeffs("coeffs_push.json")
 
 #Parsing
 def parse_log_file(file_path: str) -> np.ndarray:
@@ -168,18 +188,15 @@ def detect_segments(x: np.ndarray, deadband: int = DEADBAND, tail_ignore: int = 
 
 #Basis (4 terms)
 def basis_from_filtered(pf: np.ndarray) -> np.ndarray:
-    """
-    Build 4-term basis ON ALREADY-FILTERED pressure:
-      [ s*sqrt(|p|), p, s*|p|^(1/3), s ]
-    """
     p = np.asarray(pf, dtype=float)
     a = np.abs(p)
     s = np.sign(p)
     return np.column_stack([
-        s * np.sqrt(a),
-        p,
-        s * np.cbrt(a),
+        s * np.sqrt(a),    # turbulent (Bernoulli) component
+        p,                # laminar component
+        s * a ** (1/3),    # mid-range correction
         s,
+        np.ones_like(p),
     ])
 
 # Main compute
@@ -256,7 +273,7 @@ def run_one(file_path: str):
         tv_note = "No valid segments found"
 
     # 4) report
-    print("\n--- Tidal Volume Report ---")
+    print("\nTidal Volume Report")
     print(f"File: {file_path}")
     print(f"Samples (raw): {len(p_raw)}, Samples (filtered): {len(p_corr)}")
     print(f"Segments found: inhales={n_inh}, exhales={n_exh}")
@@ -271,7 +288,7 @@ def run_one(file_path: str):
     print(f"\nFinal TV: {TV:.3f} L  ({tv_note})")
     true_volume = 3
     error = (true_volume - abs(TV))*100/true_volume
-    print(f"Percentage error compared to true volume of {true_volume} L: {error:.2f} %")
+    #print(f"Percentage error compared to true volume of {true_volume} L: {error:.2f} %")
 
     # 5) plot with shaded inhale/exhale regions
     if PLOT and len(p_corr) > 0:
@@ -307,7 +324,7 @@ def run_one(file_path: str):
         plt.show()
 
 
-# ------------------------------ ENTRY POINT ------------------------------- #
+#ENTRY POINT
 if __name__ == "__main__":
     run_one(FILE)
 
