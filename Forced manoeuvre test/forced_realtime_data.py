@@ -8,11 +8,12 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 from collections import deque
 from typing import List, Iterable, Tuple
-import os
 import re
 import os, time, importlib.util
 from datetime import datetime
 import winsound
+import sys
+import json
 
 last_data_time = None
 end_of_test_reported = False
@@ -33,10 +34,30 @@ pressure_queue = queue.Queue()
 pressures_pa = deque(maxlen=6000)
 baseline_pressure = 0
 
-#Coefficients
-# 4-term basis coefficients (pull=inhale, push=exhale)
-pull_coefficients = np.array([ 0.176201, -0.000513, -0.111826,  0.045253, -0.045253], dtype=float)  # inhale/pull
-push_coefficients = np.array([-0.498273,  0.004855,  1.690918, -0.943883, -0.943883], dtype=float)  # exhale/push
+# --- NEW: JSON LOADER FUNCTION ---
+def load_coeffs(filename):
+    # Determines the path relative to THIS script
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    file_path = os.path.join(script_dir, "models", filename)
+    
+    if not os.path.exists(file_path):
+        print(f"\nCRITICAL ERROR: Could not find '{filename}' in 'models' folder.")
+        print(f"Path searched: {file_path}")
+        sys.exit(1)
+        
+    try:
+        with open(file_path, 'r') as f:
+            data = json.load(f)
+        print(f"[Realtime] Loaded {filename}")
+        return np.array(data["coeffs"], dtype=float)
+    except Exception as e:
+        print(f"Error reading JSON {filename}: {e}")
+        sys.exit(1)
+
+# --- REPLACED HARDCODED VALUES WITH LOADER ---
+print("--- Loading Coefficients ---")
+pull_coefficients = load_coeffs("coeffs_pull.json")
+push_coefficients = load_coeffs("coeffs_push.json")
 
 # --- NEW: knobs ---
 USE_DEADBAND = True
@@ -248,7 +269,7 @@ async def ws_listener():
     finally:
         ws_conn = None
 
-LOG_FILE = r"d:\Users\Tejaswini\Desktop\neurosyn\live plotting\New method\realtime_all\f008.log"
+LOG_FILE = r"d:\Users\Tejaswini\Desktop\neurosyn\live plotting\New method\realtime_all\trial.log"
 os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
 
 def start_ws_thread():
@@ -289,10 +310,6 @@ def remove_initial_mean(x: np.ndarray, n_init: int) -> tuple[np.ndarray, float]:
     return x - m, m
 
 def basis_from_filtered(pf: np.ndarray) -> np.ndarray:
-    """
-    4-term basis on filtered pressure:
-      [ s*sqrt(|p|), p, s*|p|^(1/3), s ]
-    """
     p = np.asarray(pf, dtype=float)
     a = np.abs(p)
     s = np.sign(p)
@@ -681,8 +698,8 @@ try:
 
     # load forced_calculations.py from same folder (exec as module)
     here = os.path.abspath(os.path.dirname(__file__))
-    analysis_path = os.path.join(here, "forced_calculations_2plots.py") 
-    spec = importlib.util.spec_from_file_location("forced_calculations_2plots", analysis_path)
+    analysis_path = os.path.join(here, "forced_calculations_2plots_json.py") 
+    spec = importlib.util.spec_from_file_location("forced_calculations_2plots_json", analysis_path)
     fa = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(fa)
 
