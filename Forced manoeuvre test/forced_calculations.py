@@ -1,5 +1,5 @@
 """
-TV_fromlog.py  (no argparse)
+TV_fromlog.py
 
 How to use:
 1) Set FILE below to your .log path.
@@ -20,10 +20,18 @@ from typing import List, Iterable, Tuple
 import os
 import numpy as np
 import matplotlib.pyplot as plt
+from GLI_2012_referencevalues_inputchangeinside import (equations, fev1_males, fev1_females, fvc_females, fvc_males, fev1fvc_males, fev1fvc_females,
+                                                        fef2575_females, fef2575_males, fef75_females, fef75_males)
+import json
+import sys
 
 # USER SETTINGS 
 # EDIT THIS TO THE LOG FILE
-FILE = r"d:\Users\Tejaswini\Desktop\neurosyn\live plotting\New method\realtime_all\f078.log"
+FILES = [r"d:\Users\Tejaswini\Desktop\neurosyn\live plotting\New method\realtime_all\f078.log",
+r"d:\Users\Tejaswini\Desktop\neurosyn\live plotting\New method\realtime_all\f066_1.log",
+r"d:\Users\Tejaswini\Desktop\neurosyn\live plotting\New method\realtime_all\un02_1.log"
+]
+
 
 # Sampling period (seconds). 0.005 = 200 Hz
 DT = 0.005
@@ -47,9 +55,28 @@ SAVE_FIGS = True
 OUTDIR = "plots"
 
 #Coefficients
-# 4-term basis coefficients (pull=inhale, push=exhale)
-pull_coefficients = np.array([ 0.176201, -0.000513, -0.111826,  0.045253, -0.045253], dtype=float)  # inhale/pull
-push_coefficients = np.array([-0.498273,  0.004855,  1.690918, -0.943883, -0.943883], dtype=float)  # exhale/push
+def load_coeffs(filename):
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    # Look in the 'models' subdirectory
+    file_path = os.path.join(script_dir, "models", filename)
+    
+    if not os.path.exists(file_path):
+        print(f"\nCRITICAL ERROR: Could not find '{filename}' in 'models' folder.")
+        print(f"Path searched: {file_path}")
+        sys.exit(1)
+        
+    try:
+        with open(file_path, 'r') as f:
+            data = json.load(f)
+        print(f"Loaded {filename}")
+        return np.array(data["coeffs"], dtype=float)
+    except Exception as e:
+        print(f"Error reading JSON {filename}: {e}")
+        sys.exit(1)
+
+print("--- Loading Coefficients ---")
+pull_coefficients = load_coeffs("coeffs_pull.json")
+push_coefficients = load_coeffs("coeffs_push.json")
 
 # Parsing
 def parse_log_file(file_path: str) -> np.ndarray:
@@ -146,11 +173,11 @@ def preprocess_one(p_raw: np.ndarray) -> np.ndarray:
     pf = streaming_fir(pc, w)
     return pf
 
-# Basis (4 terms) and model
+# Basisand model
 def basis_from_filtered(pf: np.ndarray) -> np.ndarray:
     """
-    Build 4-term basis ON ALREADY-FILTERED pressure:
-      [ s*sqrt(|p|), p, s*|p|^(1/3), s ]
+    9-term basis matching the training script:
+    [p, s*sqrt(|p|), |p|, p*s*sqrt(|p|), p^2, 1, s*log(|p|+1), p^3, abs_deriv]
     """
     p = np.asarray(pf, dtype=float)
     a = np.abs(p)
@@ -188,10 +215,13 @@ def pressure_to_flow_segments(pf: np.ndarray,
 
         seg_mean = float(np.mean(pf[s_idx:e_idx+1]))
         coeffs = push_coefficients if seg_mean > 0 else pull_coefficients
+        flow[s_idx:e_idx+1] = Phi[s_idx:e_idx+1] @ coeffs[:5]# segment-level features
+        seg = pf[s_idx:e_idx+1]
+        
+        # build contribution from full model
         flow[s_idx:e_idx+1] = Phi[s_idx:e_idx+1] @ coeffs
 
     return flow
-
 
 def integrate_flow_to_volume(flow: np.ndarray, dt: float) -> np.ndarray:
     """
@@ -200,103 +230,54 @@ def integrate_flow_to_volume(flow: np.ndarray, dt: float) -> np.ndarray:
     vol = np.cumsum(flow) * dt
     return vol
 
+deadband = 100
+threshold = 5
+start_threshold = 1
+release_threshold = 1
+
 # Segmentation logic
 # Robust segment detection for pf (filtered pressure) -> returns lists of start,end sample indices
-def detect_segments_from_pf(
-    pf: np.ndarray,
-    dt: float,
-    start_thr: float = 4,      # LOWER threshold to *detect* start (Pa) — you asked for lower detection
-    end_thr: float | None = None,
-    start_hold: int = 3,
-    end_hold: int = 10,
-    min_seg_sec: float = 0.02,
-    merge_gap_sec: float = 0.12,
-) -> tuple[list[int], list[int]]:
-    """
-    Robust segment detection with separate start/end thresholds.
-    - start_thr: threshold used to *start* a segment (lower so we capture lead-in)
-    - end_thr: threshold used to *end* a segment (defaults to 0.6 * start_thr)
-    - start_hold: consecutive samples above start_thr to confirm start
-    - end_hold: consecutive samples below end_thr to confirm end
-    - min_seg_sec: discard segments shorter than this (seconds)
-    - merge_gap_sec: merge segments separated by a short gap (seconds)
-    """
-    n = pf.size
-    if n == 0:
-        return [], []
+def detect_segments(
+    x,
+    deadband=100,
+    tail_ignore=100,
+    start_threshold=1,
+    release_threshold=1,
+    mean_amp_threshold=None,
+):
+    x = np.asarray(x, dtype=float)
+    n = len(x)
+    n_eff = max(0, n - tail_ignore)
+    if n_eff <= 0:
+        return np.asarray([], dtype=int), np.asarray([], dtype=int)
 
-    if end_thr is None:
-        end_thr = start_thr * 0.6
+    x = x[:n_eff]
 
-    abs_pf = np.abs(pf)
-    is_start_above = abs_pf >= start_thr
-    is_end_below = abs_pf <= end_thr
+    amp_threshold = mean_amp_threshold if mean_amp_threshold is not None else threshold
 
-    starts = []
-    ends = []
+    kept_starts, kept_ends = [], []
 
     i = 0
-    while i < n:
-        if is_start_above[i]:
-            # check for start_hold consecutive trues
-            run = 1
-            j = i + 1
-            while j < n and is_start_above[j] and run < start_hold:
-                run += 1
-                j += 1
+    while i < n_eff:
+        while i < n_eff and np.abs(x[i]) < start_threshold:
+            i += 1
+        if i >= n_eff:
+            break
 
-            if run >= start_hold:
-                start_idx = i
-                # find end using end_thr + end_hold
-                k = j
-                quiet = 0
-                while k < n:
-                    if is_end_below[k]:
-                        quiet += 1
-                    else:
-                        quiet = 0
-                    k += 1
-                    if quiet >= end_hold:
-                        end_idx = k - end_hold - 1
-                        break
-                else:
-                    end_idx = n - 1
+        s = i
 
-                starts.append(int(start_idx))
-                ends.append(int(end_idx))
-                i = end_idx + 1
-                continue
-            else:
-                i = j
-                continue
-        i += 1
+        while i < n_eff and np.abs(x[i]) >= release_threshold:
+            i += 1
+        e = i - 1
 
-    # Merge close segments if gap <= merge_gap_sec
-    merged_starts = []
-    merged_ends = []
-    if starts:
-        cur_s, cur_e = starts[0], ends[0]
-        for s, e in zip(starts[1:], ends[1:]):
-            gap = (s - cur_e - 1) * dt
-            if gap <= merge_gap_sec:
-                cur_e = e
-            else:
-                merged_starts.append(cur_s)
-                merged_ends.append(cur_e)
-                cur_s, cur_e = s, e
-        merged_starts.append(cur_s)
-        merged_ends.append(cur_e)
+        if e >= s:
+            length_ok = (e - s + 1) >= deadband
+            amp_ok = np.mean(np.abs(x[s:e+1])) > amp_threshold
+            if length_ok and amp_ok:
+                kept_starts.append(s)
+                kept_ends.append(e)
 
-    # Enforce minimum length
-    min_len_samples = max(1, int(round(min_seg_sec / dt)))
-    final_starts = []
-    final_ends = []
-    for s, e in zip(merged_starts, merged_ends):
-        if (e - s + 1) >= min_len_samples:
-            final_starts.append(int(s))
-            final_ends.append(int(e))
-
-    return final_starts, final_ends
+    return np.asarray(kept_starts, dtype=int), np.asarray(kept_ends, dtype=int)
 
 # Plotting helpers
 def plot_time_series(t: np.ndarray, pf: np.ndarray, flow: np.ndarray, vol: np.ndarray,
@@ -322,7 +303,6 @@ def plot_time_series(t: np.ndarray, pf: np.ndarray, flow: np.ndarray, vol: np.nd
     fig.suptitle(f"Pressure/Flow/Volume with segments")
     fig.tight_layout()
     return fig
-
 
 def plot_flow_volume(flow: np.ndarray, vol: np.ndarray,
                       starts: np.ndarray, ends: np.ndarray,
@@ -501,7 +481,7 @@ def compute_additional_metrics(flow: np.ndarray, vol: np.ndarray, starts: np.nda
         in_flow = flow[s_in:e_in+1]
         out['PIF'] = float(-np.nanmin(in_flow))  # report magnitude as positive
 
-    # ==== NEW: TLC/RV/VC from loop extremes ====
+    #   NEW: TLC/RV/VC from loop extremes  
     # Window for min/max volume: from exhalation onset to end of next inhale (if present)
     win_end = e_in if next_inhale_idx >= 0 else e_best
     vseg = vol[s_on:win_end+1]
@@ -522,329 +502,483 @@ def compute_additional_metrics(flow: np.ndarray, vol: np.ndarray, starts: np.nda
 
     return out
 
+# ----------------- PATIENT DATA (EDIT WHEN NEEDED) ----------------- #
+sex = "male"        
+age = 30
+height = 170
+ethnicity = "others"
+
+# ------------- FETCH PREDICTED + SD VALUES FROM GLI ---------------- #
+if sex.upper() == "male":
+    fev1_ref     = equations(age, height, ethnicity, fev1_males(age, height, ethnicity))
+    fvc_ref      = equations(age, height, ethnicity, fvc_males(age, height, ethnicity))
+    fev1fvc_ref  = equations(age, height, ethnicity, fev1fvc_males(age, height, ethnicity))
+    fef2575_ref  = equations(age, height, ethnicity, fef2575_males(age, height, ethnicity))
+    fef75_ref    = equations(age, height, ethnicity, fef75_males(age, height, ethnicity))
+else:
+    fev1_ref     = equations(age, height, ethnicity, fev1_females(age, height, ethnicity))
+    fvc_ref      = equations(age, height, ethnicity, fvc_females(age, height, ethnicity))
+    fev1fvc_ref  = equations(age, height, ethnicity, fev1fvc_females(age, height, ethnicity))
+    fef2575_ref  = equations(age, height, ethnicity, fef2575_females(age, height, ethnicity))
+    fef75_ref    = equations(age, height, ethnicity, fef75_females(age, height, ethnicity))
+
+# predicted values
+FEV1_pred     = fev1_ref["M"]
+FVC_pred      = fvc_ref["M"]
+FEV1FVC_pred  = fev1fvc_ref["M"]
+FEF2575_pred  = fef2575_ref["M"]
+FEF75_pred    = fef75_ref["M"]  
+
+def gli_z(measured, L, M, S):
+    """
+    Official GLI 2012 Z-score formula using LMS model.
+    """
+    if measured is None or measured <= 0 or M <= 0 or S <= 0:
+        return float("nan")
+    if abs(L) < 1e-6:   # when L is ~0 → log-normal simplify
+        return np.log(measured / M) / S
+    return ((measured / M) ** L - 1) / (L * S)
+
 PRESS_THR_PA = 3   # pressure threshold for segmentation (Pa)
 START_HOLD   = 10      # samples above threshold to start segment    
 END_HOLD     = 10     # samples below threshold to end segment
 # Main
 # Main
 def main():
-    if not os.path.exists(FILE):
-        raise FileNotFoundError(f"Log file not found: {FILE}")
+    # --- CONFIG ---
+    colors = ['#1f77b4', '#ff7f0e', '#2ca02c']  # Blue, Orange, Green
+    
+    # Check files
+    existing_files = [f for f in FILES if os.path.exists(f)]
+    if not existing_files:
+        raise FileNotFoundError("None of the provided FILES exist.")
 
-    # 1) Parse
-    p_raw = parse_log_file(FILE)
-    if p_raw.size == 0:
-        raise RuntimeError("No pressure samples decoded from the log.")
-
-    # 2) Filter + baseline
-    pf = preprocess_one(p_raw)
-
-    # Build time vector matching filtered signal length
-    t = np.arange(pf.size) * DT
-
-    # 3) Detect segments on filtered pressure
-    # pf is your filtered pressure array, DT is sample interval
-    # detection with LOWER start threshold (capture lead-in)
-    START_DETECT_THR = 3          # lower detection threshold in Pa (tune as needed)
-    END_DETECT_THR   = START_DETECT_THR * 0.6
-
-    # deadband for exhale/artifact filtering (Pa)
-    SEGMENT_PEAK_DEADBAND_PA = 150.0   # set to 200 or 300 as you prefer
-
-    starts, ends = detect_segments_from_pf(
-        pf,
-        dt=DT,
-        start_thr=START_DETECT_THR,
-        end_thr=END_DETECT_THR,
-        start_hold=START_HOLD,
-        end_hold=END_HOLD,
-        min_seg_sec=0.02,
-        merge_gap_sec=0.12,
-    )
-    print(f"Detected {len(starts)} raw segments: {list(zip(starts, ends))}")
-
-    # now per-segment pressure->flow but only for segments that exceed deadband
-    flow = pressure_to_flow_segments(pf, starts, ends, min_peak_pa=SEGMENT_PEAK_DEADBAND_PA)
-
-    #compute baseline from quiet region then subtract if you do that later
-    flow_baseline = float(np.median(flow[:2000])) if flow.size >= 2000 else float(np.median(flow))
-    flow_baseline_removed = flow - flow_baseline
-    print(f"Flow baseline removed: {flow_baseline:.6f} L/s")
-
-
-    # 5) Integrate to Volume
-    vol = integrate_flow_to_volume(flow, DT)
-
-    # 6) Plot
+    # --- SETUP PLOT (Once) ---
     if PLOT:
-        os.makedirs(OUTDIR, exist_ok=True)
+        # WINDOW 1: Flow-Volume Loop
+        fig1, ax_fv = plt.subplots(figsize=(8, 8), constrained_layout=True)
+        fig1.canvas.manager.set_window_title("Flow-Volume Loop") # Set Window Title
+        fig1.suptitle("Analysis: Flow-Volume Loop", fontsize=16, weight='bold')
 
-        # Compute metrics once
-        metrics = compute_exhale_metrics(flow, vol, starts, ends, DT)
-        extra = compute_additional_metrics(flow, vol, starts, ends, DT, metrics)
+        # WINDOW 2: Volume-Time Graph
+        fig2, ax_evs = plt.subplots(figsize=(10, 7), constrained_layout=True)
+        fig2.canvas.manager.set_window_title("Volume-Time Graph") # Set Window Title
+        fig2.suptitle("Analysis: Volume vs Time", fontsize=16, weight='bold')
 
-        # Create 1x3 grid (2 plots + 1 for metrics)
-        fig, axs = plt.subplots(1, 3, figsize=(16, 6), constrained_layout=True) # Changed 1x2 to 1x3, increased size
-        fig.suptitle("Spirometry Analysis (Plots and Metrics)", fontsize=14, y=1.05)
-
-        # Define the three axes
-        ax_fv      = axs[0]  # LEFT plot: Flow–Volume Loop
-        ax_evs     = axs[1]  # MIDDLE plot: Exhaled Volume vs Time
-        ax_metrics = axs[2]  # RIGHT slot: Metrics display
-
-
-        # --- Flow–Volume Loop (LEFT: ax_fv) ---
-        # Build named segment records (human numbering: Segment 1, Segment 2, ...)
-        segments = []   # clean list start
-        FLOW_MIN_THRESHOLD = 0.2   # L/s  (your requirement)
-        for idx, (s, e) in enumerate(zip(starts, ends), start=1):
-            seg_flow = flow[s:e+1] - flow[s]  # zeroed flow for segment
-            seg_vol  = vol[s:e+1]
-            if seg_flow.size == 0:
-                continue
-
-            seg_peak_flow = np.nanmax(np.abs(seg_flow))
-            if seg_peak_flow < FLOW_MIN_THRESHOLD:
-                # skip small baby-breath artifacts
-                continue
-            mean_flow = float(np.nanmean(seg_flow)) if seg_flow.size else 0.0
-            seg_name = f"Segment {idx}"
-            segments.append({
-                "name": seg_name,
-                "start": int(s),
-                "end": int(e),
-                "mean_flow": mean_flow,
-                "flow": seg_flow,
-                "vol": seg_vol,
-            })
-
-        # Debug print of detected segments
-        print("Segments summary:")
-        for seg in segments:
-            print(f"  {seg['name']}: {seg['start']}..{seg['end']}, mean_flow={seg['mean_flow']:.4f}")
-
-        # Choose which human-numbered segments to plot (2nd and 3rd)
-        wanted_one_based = [2, 3]
-        wanted_zero_based = [n - 1 for n in wanted_one_based]
-
-        # ---------------- Assemble selected segments but zero FLOW at each segment start (x unchanged) ------------
-        sel_v = []
-        sel_f = []
-
-        # tuning: how much pre-start to use to estimate baseline flow (ms -> samples)
-        PRE_START_BASELINE_MS = 50
-        pre_samples = max(1, int(round((PRE_START_BASELINE_MS / 1000.0) / DT)))
-        volume_offset = None  # shared for all selected segments in this maneuver
-        baseline_flow = float(np.median(flow[:2000])) if flow.size >= 2000 else float(np.median(flow))
+        # WINDOW 3: Metrics Table
+        # Made this window wider (12) to accommodate the table columns comfortably
+        fig3, ax_metrics = plt.subplots(figsize=(12, 6), constrained_layout=True)
+        fig3.canvas.manager.set_window_title("Metrics Summary") # Set Window Title
+        fig3.suptitle("Metrics Summary", fontsize=16, weight='bold')
         
-        for i in wanted_zero_based:
-            if 0 <= i < len(segments):
-                seg = segments[i]
-                s = seg["start"]
-                e = seg["end"]
+        # Ensure the table axis has no borders/ticks
+        ax_metrics.axis('off')
 
-                seg_v_abs = seg["vol"].astype(float)   # absolute volume from integration
-                seg_f     = seg["flow"].astype(float)
-
-                # ---- FLOW: subtract only baseline, no per-seg zeroing ----
-                # (you already computed baseline_flow earlier)
-                seg_f_plot = seg_f - baseline_flow
-
-                # ---- VOLUME: one shared offset so exhale starts at 0 ----
-                if volume_offset is None:
-                    # define offset from *first* selected segment (your exhale)
-                    volume_offset = seg_v_abs[0]
-
-                seg_v_plot = seg_v_abs - volume_offset   # both exhale & inhale use SAME offset
-
-                sel_v.extend(seg_v_plot.tolist())
-                sel_f.extend(seg_f_plot.tolist())
-                sel_v.append(np.nan); sel_f.append(np.nan)
-            else:
-                print(f"[warning] requested segment {i+1} not available (found {len(segments)})")
-
-        # ---------------- Plot: Flow–Volume Loop (LEFT: ax_fv) ------------
-        ax_fv.cla()
+        # --- STYLING FIGURE 1 (Flow-Volume) ---
         ax_fv.set_xlabel("Volume (L)", fontsize=10)
         ax_fv.set_ylabel("Flow (L/s)", fontsize=10)
-        ax_fv.set_title("Flow–Volume Loop — selected segments", fontsize=11)
-        ax_fv.set_xlim([-6, 6])
-        ax_fv.set_ylim([-10, 14])
-        ax_fv.set_xticks(np.arange(-6, 6, 1))
-        ax_fv.set_yticks(np.arange(-10, 14, 2))
-        ax_fv.grid(True, alpha=0.3)
+        ax_fv.set_title("Flow–Volume Loop", fontsize=12)
+        ax_fv.set_xlim([-1, 10]) 
+        ax_fv.set_ylim([-10, 15]) 
+        ax_fv.set_xticks(np.arange(-1, 11, 1))
+        ax_fv.set_yticks(np.arange(-10, 16, 2))
+        ax_fv.axhline(0, color='k', linewidth=1.2) 
+        ax_fv.axvline(0, color='k', linewidth=1.2)
+        ax_fv.grid(True, which='both', linestyle='-', alpha=0.3)
 
-        if len(sel_v):
-            ax_fv.plot(sel_v, sel_f, linewidth=1.2, label="Segments")
-            # annotate segment starts using original absolute coords
-            for j, n in enumerate(wanted_zero_based):
-                if 0 <= n < len(segments):
-                    seg = segments[n]
-            ax_fv.legend(loc='upper right', fontsize=8)
-        else:
-            ax_fv.text(0.5, 0.5, "No selected segments to plot", ha='center', va='center', transform=ax_fv.transAxes)
+        # --- STYLING FIGURE 1 (Metrics Panel) ---
+        ax_metrics.axis('off')
+        ax_metrics.set_title("", fontsize=12)
 
+        # --- STYLING FIGURE 2 (Volume-Time) ---
+        ax_evs.set_xlabel("Time (s)", fontsize=10)
+        ax_evs.set_ylabel("Volume (L)", fontsize=10)
+        ax_evs.set_title("Volume vs Time", fontsize=12)
+        ax_evs.set_xlim([-1, 15])
+        ax_evs.set_ylim([-1, 9])
+        ax_evs.set_xticks(np.arange(-1, 16, 1))
+        ax_evs.set_yticks(np.arange(-1, 10, 1))
+        ax_evs.axhline(0, color='k', linewidth=1.2)
+        ax_evs.axvline(0, color='k', linewidth=1.2)
+        ax_evs.grid(True, which='both', linestyle='-', alpha=0.3)
 
-        # --- Exhaled Volume vs Time (MIDDLE: ax_evs) ---
-        if metrics["s_best"] >= 0 and metrics["e_best"] >= 0:
+    table_data = []
+    column_headers = []
+
+    # --- LOOP THROUGH FILES ---
+    for i, file_path in enumerate(FILES):
+        trial_label = f"Trial {i+1}"
+        color = colors[i % len(colors)]
+        
+        # TERMINAL LOGGING
+        print(f" PROCESSING {trial_label}: {os.path.basename(file_path)}")
+
+        if not os.path.exists(file_path):
+            print(f"  [Skipped] File not found.")
+            table_data.append({})
+            column_headers.append(f"{trial_label}\n(Missing)")
+            continue
+
+        # 1) Parse
+        p_raw = parse_log_file(file_path)
+        if p_raw.size == 0:
+            print("  [Skipped] No data found.")
+            continue
+
+        # 2) Filter + Baseline
+        pf = preprocess_one(p_raw)
+        t = np.arange(pf.size) * DT
+
+        # 3) Detect Segments
+        SEGMENT_PEAK_DEADBAND_PA = 150.0
+        tail_ignore=100
+        starts, ends = detect_segments(
+    pf,
+    deadband=100,
+    tail_ignore=150,
+    start_threshold=1,
+    release_threshold=1,
+    mean_amp_threshold=5,
+)
+
+        # 4) Pressure -> Flow
+        flow = pressure_to_flow_segments(pf, starts, ends, min_peak_pa=SEGMENT_PEAK_DEADBAND_PA)
+        flow_baseline = float(np.median(flow[:2000])) if flow.size >= 2000 else float(np.median(flow))
+
+        # 5) Integrate to Volume
+        vol = integrate_flow_to_volume(flow, DT)
+
+        # 6) Compute Metrics
+        metrics = compute_exhale_metrics(flow, vol, starts, ends, DT)
+        extra = compute_additional_metrics(flow, vol, starts, ends, DT, metrics)
+        
+        # Merge into one dict BEFORE appending
+        full_stats = {**metrics, **extra}
+        
+        column_headers.append(trial_label)
+
+        # ---------------------- Measured values ---------------------- #
+        meas_FEV1     = metrics["FEV1"]
+        meas_FVC      = metrics["FVC"]
+        meas_ratio    = metrics["FEV1_FVC"]/100 if metrics["FEV1_FVC"]>0 else float("nan") # convert %→fraction
+        meas_FEF2575  = extra["FEF25_75"]
+        meas_FEF75    = extra["FEF75"]
+
+        # ---------------------- GLI Z-scores ------------------------- #
+        FEV1_z     = gli_z(meas_FEV1,    fev1_ref["L"], fev1_ref["M"], fev1_ref["S"])
+        FVC_z      = gli_z(meas_FVC,     fvc_ref["L"],  fvc_ref["M"],  fvc_ref["S"])
+        FEV1FVC_z  = gli_z(meas_ratio,   fev1fvc_ref["L"], fev1fvc_ref["M"], fev1fvc_ref["S"])
+        FEF2575_z  = gli_z(meas_FEF2575, fef2575_ref["L"], fef2575_ref["M"], fef2575_ref["S"])
+        FEF75_z    = gli_z(meas_FEF75,   fef75_ref["L"],  fef75_ref["M"],  fef75_ref["S"])
+
+        # ---------------------- push to results ---------------------- #
+        # Update the full_stats dict that will be appended
+        full_stats.update({
+            "FEV1_pred": FEV1_pred,
+            "FVC_pred": FVC_pred,
+            "FEV1FVC_pred": FEV1FVC_pred * 100, # Store as percentage (e.g. 80.5) to match measured
+            "FEF25_75_pred": FEF2575_pred,
+            "FEF75_pred": FEF75_pred,
+
+            "FEV1_z": FEV1_z,
+            "FVC_z": FVC_z,
+            "FEV1FVC_z": FEV1FVC_z,
+            "FEF25_75_z": FEF2575_z,
+            "FEF75_z": FEF75_z
+        })
+
+        # Append AFTER all updates
+        table_data.append(full_stats)
+
+        # --- PLOTTING (Flow–Volume Loop: Exhale + immediate Inhale) ---
+        if PLOT and metrics["s_best"] >= 0:
+
+            # Forced exhale indices
             s_on = metrics["s_on"]
-            e_best = metrics["e_best"]
-            t_exhale = t[s_on:e_best+1] - t[s_on]
-            vol_exhale = vol[s_on:e_best+1] - vol[s_on]
-            # Force non-decreasing (prevents tiny negative tails)
-            vol_exhale = np.maximum.accumulate(vol_exhale)
+            e_ex = metrics["e_best"]
 
-            ax_evs.plot(t_exhale, (vol_exhale), linewidth=1.5)
-            ax_evs.set_xlabel("Time (s)", fontsize=10)
-            ax_evs.set_ylabel("Volume (L)", fontsize=10)
-            ax_evs.set_title("Exhaled Volume vs Time (Main Exhale)", fontsize=11)
-            ax_evs.set_xticks(np.arange(0, 13, 1))
-            ax_evs.set_yticks(np.arange(0, 8, 1))
-            ax_evs.grid(True, alpha=0.3)
+            # Find the inhale segment immediately AFTER the forced exhale
+            s_in, e_in = None, None
+            for ss, ee in zip(starts, ends):
+                if ss > e_ex and np.nanmean(flow[ss:ee+1]) < 0:
+                    s_in, e_in = ss, ee
+                    break
 
-            idx_1s = int(round(1.0 / DT))
-            if len(t_exhale) > idx_1s:
-                ax_evs.axvline(t_exhale[idx_1s], color='r', linestyle='--', alpha=0.6, label="1s (FEV1)")
-            ax_evs.axvline(t_exhale[-1], color='g', linestyle='--', alpha=0.6, label="End of Exhale (FVC)")
-            ax_evs.legend(loc="best", fontsize=9)
-            ax_evs.grid(True, alpha=0.3)
-        else:
-            ax_evs.text(0.5, 0.5, "No exhale segment detected", ha="center", va="center", fontsize=10)
+            # SINGLE volume reference (this is the key fix)
+            v0 = vol[s_on]
 
-        # --- Metrics Display (RIGHT: ax_metrics) ---
-        ax_metrics.axis('off') # Hide axes for a clean text box
-        
-        # Prepare text content
-        def fmt_or_na(x, fmt="{:.3f}"):
-            return "NA" if np.isnan(x) else fmt.format(x)
+            # Exhale limb
+            fv_vol_ex = vol[s_on:e_ex+1] - v0
+            fv_flow_ex = flow[s_on:e_ex+1]
 
-        def getm(key):
-            return extra.get(key, np.nan)
+            # --- TRIM unstable zero-crossing region (BACKTRACK METHOD) ---
+            # Strategy: Find the PEAK of the exhale, then walk BACKWARDS 
+            # until flow drops below a cutoff. This deletes the "hesitation loop".
+            if len(fv_flow_ex) > 0:
+                # 1. Find Peak
+                idx_peak = np.argmax(fv_flow_ex)
+                
+                # 2. Threshold (10% of Peak)
+                cutoff_flow = 0.10 * fv_flow_ex[idx_peak]
+                
+                # 3. Walk Backward
+                start_trim_idx = 0
+                for k in range(idx_peak, -1, -1):
+                    if fv_flow_ex[k] < cutoff_flow:
+                        start_trim_idx = k + 1
+                        break
+                
+                # 4. Slice (Cut the garbage)
+                fv_flow_ex = fv_flow_ex[start_trim_idx:]
+                fv_vol_ex = fv_vol_ex[start_trim_idx:]
+                
+                # 5. RE-ZERO & ANCHOR
+                if len(fv_vol_ex) > 0:
+                    # A. Calculate a tiny volume offset for a natural slope 
+                    # (Triangle area: 0.5 * flow * dt)
+                    # This prevents the "Vertical Wall" look.
+                    vol_offset = (fv_flow_ex[0] * DT) / 2.0
+                    
+                    # B. Shift the main curve so it starts slightly after 0
+                    fv_vol_ex = (fv_vol_ex - fv_vol_ex[0]) + vol_offset
+                    
+                    # C. Prepend (0,0) to force the line to start at origin
+                    fv_flow_ex = np.insert(fv_flow_ex, 0, 0.0)
+                    fv_vol_ex  = np.insert(fv_vol_ex, 0, 0.0)
 
-        # FVC/FEV1 Block
-        text_lines = [f"File: {os.path.basename(FILE)}"]
-        text_lines.append("\n-- Main Metrics --")
-        text_lines.append(f"FVC = {fmt_or_na(metrics['FVC'])} L")
-        if metrics["ErrNum"] == 9:
-            text_lines.append("FEV1 = NA (No Exhale)")
-            text_lines.append("FEV1% = NA")
-        else:
-            if metrics["ErrNum"] == 7:
-                text_lines.append("FEV1 = NA (Invalid)")
+            if s_in is not None:
+                # Inhale limb (continuous)
+                fv_vol_in = vol[s_in:e_in+1] - v0
+                fv_flow_in = flow[s_in:e_in+1]
+
+                fv_vol = np.concatenate([fv_vol_ex, fv_vol_in])
+                fv_flow = np.concatenate([fv_flow_ex, fv_flow_in])
             else:
-                text_lines.append(f"FEV1 = {fmt_or_na(metrics['FEV1'])} L")
-            if metrics["FEV1_FVC"] > 0:
-                text_lines.append(f"FEV1/FVC% = {fmt_or_na(metrics['FEV1_FVC'])} %")
-            else:
-                text_lines.append("FEV1/FVC% = NA (Invalid)")
-        
-        # -- Flow Rates --
-        text_lines.append("\n-- Flow Rates --")
-        text_lines.append(f"PEF = {fmt_or_na(getm('PEF'))} L/s")
-        text_lines.append(f"PIF = {fmt_or_na(getm('PIF'))} L/s")
-        text_lines.append(f"FEF25 = {fmt_or_na(getm('FEF25'))} L/s")
-        text_lines.append(f"FEF50 = {fmt_or_na(getm('FEF50'))} L/s")
-        text_lines.append(f"FEF75 = {fmt_or_na(getm('FEF75'))} L/s")
-        text_lines.append(f"FEF25-75 = {fmt_or_na(getm('FEF25_75'))} L/s")
-        text_lines.append(f"FET = {fmt_or_na(getm('FET'), fmt='{:.2f}')} s")
+                # Fallback: exhale only
+                fv_vol = fv_vol_ex
+                fv_flow = fv_flow_ex
 
-        # -- Capacity --
-        text_lines.append("\n-- Capacity --")
-        text_lines.append(f"VC = {fmt_or_na(getm('VC'))} L")
-        text_lines.append(f"TLC = {fmt_or_na(getm('TLC'))} L")
-        text_lines.append(f"RV = {fmt_or_na(getm('RV'))} L")
-        text_lines.append(f"FIVC = {fmt_or_na(getm('FIVC'))} L")
-        text_lines.append(f"BEV = {fmt_or_na(getm('BEV'))} L")
+            ax_fv.plot(
+                fv_vol,
+                fv_flow,
+                linewidth=1.8,
+                color=color,
+                label=trial_label
+            )
 
-         # Combine lines into single text block
+            # B. Prepare Volume-Time
+            if metrics["s_best"] >= 0 and metrics["e_best"] >= 0:
+                s_on = metrics["s_on"]
+                e_best = metrics["e_best"]
+                t_exhale = t[s_on:e_best+1] - t[s_on]
+                vol_exhale = vol[s_on:e_best+1] - vol[s_on]
+                vol_exhale = np.maximum.accumulate(vol_exhale)
+                
+                ax_evs.plot(t_exhale, vol_exhale, linewidth=1.5, color=color, label=trial_label)
 
-        text_content = "\n".join(text_lines)
-        ax_metrics.text(
-            0.05, 0.95, text_content,
-            transform=ax_metrics.transAxes,
-            fontsize=10,
-            verticalalignment='top',
-            family='monospace',
-        )
+    #        ATS/ERS BEST TRIAL LOGIC        #
+    # Best FEV1 trial
+    best_FEV1_idx = max(range(len(table_data)), key=lambda i: table_data[i].get("FEV1", -np.inf))
 
+    # Best FVC trial
+    best_FVC_idx  = max(range(len(table_data)), key=lambda i: table_data[i].get("FVC", -np.inf))
 
-        # Final layout tweaks
-        try:
-            fig.tight_layout(rect=[0, 0, 1, 0.96])
-        except Exception:
-            plt.tight_layout()
+    # Best FLOW trial → highest combined effort (FEV1 + FVC)
+    best_FLOW_idx = max(range(len(table_data)), 
+                        key=lambda i: (table_data[i].get("FEV1",0) + table_data[i].get("FVC",0)))
 
-        # Save figure with tight bounding box so PNG doesn't crop awkwardly
-        if SAVE_FIGS:
-            figpath = os.path.join(OUTDIR, "combined_plots_with_metrics.png")
-            fig.savefig(figpath, dpi=150, bbox_inches='tight')
+    # Final values based on ATS/ERS
+    final_FEV1 = table_data[best_FEV1_idx]["FEV1"]
+    final_FVC  = table_data[best_FVC_idx]["FVC"]
+    final_ratio = (final_FEV1 / final_FVC * 100) if final_FVC>0 else np.nan
 
-        plt.show() # Keep the first show call
-        
-        # --- End of Plotting Block ---
+    # FLOW metrics taken from best FLOW trial
+    FLOW_best = table_data[best_FLOW_idx]
+    final_PEF      = FLOW_best.get("PEF", np.nan)
+    final_FEF2575  = FLOW_best.get("FEF25_75", np.nan)
+    final_FEF75    = FLOW_best.get("FEF75", np.nan)
 
+    #ZScore + %Pred using correct selected values
+    final_FEV1_z = gli_z(final_FEV1, fev1_ref["L"], fev1_ref["M"], fev1_ref["S"])
+    final_FVC_z  = gli_z(final_FVC,  fvc_ref["L"],  fvc_ref["M"],  fvc_ref["S"])
+    final_ratio_z = gli_z(final_ratio/100, fev1fvc_ref["L"], fev1fvc_ref["M"], fev1fvc_ref["S"])
+    # ADD THESE LINES to define the missing variables
+    final_FEF2575_z = gli_z(final_FEF2575, fef2575_ref["L"], fef2575_ref["M"], fef2575_ref["S"])
+    final_FEF75_z   = gli_z(final_FEF75,   fef75_ref["L"],  fef75_ref["M"],  fef75_ref["S"])
+    final_PEF_pct      = (final_PEF/FEF75_pred*100) if FEF75_pred>0 else np.nan
+    final_FEV1_pct     = (final_FEV1/FEV1_pred*100)
+    final_FVC_pct      = (final_FVC/FVC_pred*100)
+    final_FEF2575_pct  = (final_FEF2575/FEF2575_pred*100) if FEF2575_pred>0 else np.nan
 
-    # 6.5) Metrics (FVC, FEV1, FEV1%)
-    # KEEPING THIS FOR CONSOLE OUTPUT/DEBUG
-    metrics = compute_exhale_metrics(flow, vol, starts, ends, DT)
-    FVC = metrics["FVC"]; FEV1 = metrics["FEV1"]; FEV1_FVC = metrics["FEV1_FVC"]
+    print(f"Best FEV1 → Trial {best_FEV1_idx+1}: {final_FEV1:.2f} L")
+    print(f"Best FVC  → Trial {best_FVC_idx+1}: {final_FVC:.2f} L")
+    print(f"Best Flow Trial (for other parameters) → Trial {best_FLOW_idx+1}")
 
+    # === [MISSING CODE] Construct the dictionaries for the table loop ===
+    final_vals = {
+        "FEV1": final_FEV1,
+        "FVC": final_FVC,
+        "FEV1_FVC": final_ratio,
+        "PEF": final_PEF,
+        "FEF25_75": final_FEF2575,
+        "FEF75": final_FEF75,
+        # For other metrics, pull directly from the best flow trial
+        "FET": FLOW_best.get("FET", np.nan),
+        "TLC": FLOW_best.get("TLC", np.nan),
+        "RV": FLOW_best.get("RV", np.nan),
+        "VC": FLOW_best.get("VC", np.nan),
+        "BEV": FLOW_best.get("BEV", np.nan),
+        "FEF25": FLOW_best.get("FEF25", np.nan),
+        "FEF50": FLOW_best.get("FEF50", np.nan),
+        "FIVC": FLOW_best.get("FIVC", np.nan),
+        "PIF": FLOW_best.get("PIF", np.nan),
+    }
+
+    final_z = {
+        "FEV1": final_FEV1_z,
+        "FVC": final_FVC_z,
+        "FEV1_FVC": final_ratio_z,
+        "FEF25_75": final_FEF2575_z,
+        "FEF75": final_FEF75_z,
+    }
     
-    # Additional parameters
-    extra = compute_additional_metrics(flow, vol, starts, ends, DT, metrics)
-    # Print block
-    def fmt_or_na(x, fmt="{:.6f}"):
-        return "NA" if np.isnan(x) else fmt.format(x)
+    # --- FINAL TABLE GENERATION ---
+    if PLOT and len(table_data) > 0:
+        ax_fv.legend(loc='upper right', fontsize=9)
+        ax_evs.legend(loc='lower right', fontsize=9)
 
-    print(f"FVC = {fmt_or_na(FVC)} L")
-
-    if metrics["ErrNum"] == 9:
-        print("FEV1 = NA  (no exhale segment)")
-        print("FEV1/FVC = NA  (no exhale segment)")
-    else:
-        if metrics["ErrNum"] == 7:
-            print("FEV1 = NA  (segment shorter than 1s)")
+        # --- IDENTIFY BEST TRIAL INDICES ---
+        if table_data:
+            # Index of trial with best FEV1
+            idx_best_fev1 = max(range(len(table_data)), key=lambda i: table_data[i].get("FEV1", -np.inf))
+            
+            # Index of trial with best FVC
+            idx_best_fvc = max(range(len(table_data)), key=lambda i: table_data[i].get("FVC", -np.inf))
+            
+            # Index of Best Flow Trial (Sum of FEV1 + FVC)
+            idx_best_flow = max(range(len(table_data)), 
+                                key=lambda i: (table_data[i].get("FEV1", 0) or 0) + (table_data[i].get("FVC", 0) or 0))
         else:
-            print(f"FEV1 = {fmt_or_na(FEV1)} L")
+            idx_best_fev1 = idx_best_fvc = idx_best_flow = -1
+            
+        # 2. Define Rows with mapping to (Metric Key, Pred Key, Z Key)
+        # Format: (Display Label, Metric_Key, Pred_Key, Z_Key, Format_String)
+        rows_config = [
+            ("FVC (L)",      "FVC",      "FVC_pred",      "FVC_z",      "{:.2f}"),
+            ("FEV1 (L)",     "FEV1",     "FEV1_pred",     "FEV1_z",     "{:.2f}"),
+            ("FEV1/FVC (%)", "FEV1_FVC", "FEV1FVC_pred",  "FEV1FVC_z",  "{:.1f}"), # Ratio is %
+            ("FEF75 (L/s)",  "FEF75",    "FEF75_pred",    "FEF75_z",    "{:.2f}"),
+            ("FEF25-75",     "FEF25_75", "FEF25_75_pred", "FEF25_75_z", "{:.2f}"),
+            # Non-Zscore rows
+            ("PEF (L/s)",    "PEF",      None,            None,         "{:.2f}"),
+            ("PIF (L/s)",    "PIF",      None,            None,         "{:.2f}"),
+            ("FET (s)",      "FET",      None,            None,         "{:.2f}"),
+            ("TLC (L)",      "TLC",      None,            None,         "{:.2f}"),
+            ("RV (L)",       "RV",       None,            None,         "{:.2f}"),
+            ("VC (L)",       "VC",       None,            None,         "{:.2f}"),
+            ("BEV (L)",      "BEV",      None,            None,         "{:.2f}"),
+            ("FEF25 (L/s)",   "FEF25",    None,            None,         "{:.2f}"),
+            ("FEF50 (L/s)",   "FEF50",    None,            None,         "{:.2f}"),
+            ("FIVC (L)",      "FIVC",     None,            None,         "{:.2f}"),
+        ]
 
-        if np.isnan(FEV1_FVC):
-            print("FEV1/FVC = NA  (FEV1/FVC invalid)")
-        else:
-            print(f"FEV1/FVC = {fmt_or_na(FEV1_FVC, fmt='{:.3f}')} %")
+        #        TABLE BUILD SECTION       == #
+
+        cell_text = []
+        row_labels = []
 
 
-    # FEFs and PEF
-    if extra:
-        def print_metric(key, label=None, fmt="{:.6f}", suffix=""):
-            if label is None:
-                label = key
-            val = extra.get(key, np.nan)
-            if not np.isnan(val):
-                print(f"{label} = {fmt.format(val)}{suffix}")
+        # Column headers = Trials + 3 Summary Columns
+        trial_headers = [f"Trial {i+1}" for i in range(len(table_data))]
+        final_cols = trial_headers + ["Pred", "Best Values", "%Pred", "Z Score"]
+
+
+        # Calculate the column index for "Best Values"
+        # Index = Number of Trials (0 to N-1) + 1 (Pred column)
+        best_val_col_idx = len(table_data) + 1 
+
+        red_cells = [] 
+        for r_idx, (label, data_key, pred_key, z_key, fmt) in enumerate(rows_config, start=1):
+            row_labels.append(label)
+            current_row = []
+
+            # Determine which trial gets the star/color
+            if data_key == "FEV1":
+                target_idx = idx_best_fev1
+            elif data_key == "FVC":
+                target_idx = idx_best_fvc
+            elif data_key == "FEV1_FVC":
+                target_idx = -1 
             else:
-                print(f"{label} = NA{suffix}")
+                target_idx = idx_best_flow
 
-        print_metric("FEF25")
-        print_metric("FEF50")
-        print_metric("FEF75")
-        print_metric("FEF25_75", label="FEF25_75")
-        print_metric("PEF")
-        print_metric("FET", fmt="{:.3f}", suffix=" s")
-        print_metric("PIF")
-        print_metric("TLC")
-        print_metric("RV")
-        print_metric("VC")
-        print_metric("FIVC")
-        print_metric("BEV")
+            # A. Trial Data
+            for i, d in enumerate(table_data):
+                val = d.get(data_key, np.nan)
+                if isinstance(val, (int, float)) and not np.isnan(val):
+                    val_str = fmt.format(val)
+                    # Check if this is the chosen best trial
+                    if i == target_idx:
+                        # Store (row, col) to color it later
+                        red_cells.append((r_idx, i)) 
+                    current_row.append(val_str)
+                else:
+                    current_row.append("-")
 
-    # 7) Print simple summary
-    #print(f"Decoded samples (raw): {p_raw.size}")
-    #print(f"Filtered samples     : {pf.size}")
-    print(f"Segments detected    : {len(starts)}")
-    for i, (s, e) in enumerate(zip(starts, ends), 1):
-        seg = slice(s, e+1)
-        seg_type = "EXHALE/push" if np.mean(pf[seg]) > 0 else "INHALE/pull"
-        print(f"  seg#{i:02d}: {seg_type:12s}  len={e-s+1} samples, duration={(e-s+1)*DT:.3f}s")
+            # B. Predicted
+            pred_val = table_data[0].get(pred_key, np.nan) if (table_data and pred_key) else np.nan
+            current_row.append(fmt.format(pred_val) if not np.isnan(pred_val) else "-")
+
+            # C. Best Values (ATS Selection)
+            best_val = final_vals.get(data_key, np.nan)
+            
+            # --- NEW: Mark the "Best Values" column red as well ---
+            if not np.isnan(best_val):
+                 red_cells.append((r_idx, best_val_col_idx))
+            # ----------------------------------------------------
+            
+            current_row.append(fmt.format(best_val) if not np.isnan(best_val) else "-")
+
+            # D. % Predicted
+            if not np.isnan(best_val) and not np.isnan(pred_val) and pred_val != 0:
+                pct = (best_val / pred_val) * 100
+                current_row.append(f"{pct:.1f}")
+            else:
+                current_row.append("-")
+
+            # E. Z-Score
+            z_val = final_z.get(data_key, np.nan)
+            current_row.append(f"{z_val:.2f}" if not np.isnan(z_val) else "-")
+
+            cell_text.append(current_row)
+
+        # 3. Create Table
+        final_cols = column_headers + ["Pred", "Best Values", "%Pred", "z-score"]
+        
+        the_table = ax_metrics.table(
+            cellText=cell_text,
+            rowLabels=row_labels,
+            colLabels=final_cols,
+            loc='center',
+            cellLoc='center',
+            edges='horizontal'
+        )
+        the_table.auto_set_font_size(False)
+        the_table.set_fontsize(9)
+        the_table.scale(1, 1.5)
+
+        #Apply red color to best values
+        for (r, c) in red_cells:
+            # Check if cell exists (safety)
+            if (r, c) in the_table.get_celld():
+                cell = the_table[r, c]
+                cell.get_text().set_color('red')
+                cell.get_text().set_weight('bold') # Optional: make it bold too
+
+        plt.show()
+        plt.show()
 
 if __name__ == "__main__":
     main()
+
+
