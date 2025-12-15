@@ -1,5 +1,5 @@
 """
-TV_fromlog.py
+TV_fromlog.py  (no argparse)
 
 How to use:
 1) Set FILE below to your .log path.
@@ -74,7 +74,7 @@ def load_coeffs(filename):
         print(f"Error reading JSON {filename}: {e}")
         sys.exit(1)
 
-print("--- Loading Coefficients ---")
+print("Loading Coefficients")
 pull_coefficients = load_coeffs("coeffs_pull.json")
 push_coefficients = load_coeffs("coeffs_push.json")
 
@@ -175,10 +175,6 @@ def preprocess_one(p_raw: np.ndarray) -> np.ndarray:
 
 # Basisand model
 def basis_from_filtered(pf: np.ndarray) -> np.ndarray:
-    """
-    9-term basis matching the training script:
-    [p, s*sqrt(|p|), |p|, p*s*sqrt(|p|), p^2, 1, s*log(|p|+1), p^3, abs_deriv]
-    """
     p = np.asarray(pf, dtype=float)
     a = np.abs(p)
     s = np.sign(p)
@@ -468,7 +464,7 @@ def compute_additional_metrics(flow: np.ndarray, vol: np.ndarray, starts: np.nda
     # FET
     out['FET'] = float((e_best - s_on + 1) * dt)
 
-    # ---- Find the next inhale segment (if any) ----
+    #  Find the next inhale segment (if any) 
     next_inhale_idx = -1
     for j, (ss, ee) in enumerate(zip(starts, ends)):
         if ss > e_best and np.nanmean(flow[ss:ee+1]) < 0:
@@ -502,13 +498,13 @@ def compute_additional_metrics(flow: np.ndarray, vol: np.ndarray, starts: np.nda
 
     return out
 
-# ----------------- PATIENT DATA (EDIT WHEN NEEDED) ----------------- #
+# - PATIENT DATA (EDIT WHEN NEEDED) - #
 sex = "male"        
 age = 30
 height = 170
 ethnicity = "others"
 
-# ------------- FETCH PREDICTED + SD VALUES FROM GLI ---------------- #
+# - FETCH PREDICTED + SD VALUES FROM GLI  #
 if sex.upper() == "male":
     fev1_ref     = equations(age, height, ethnicity, fev1_males(age, height, ethnicity))
     fvc_ref      = equations(age, height, ethnicity, fvc_males(age, height, ethnicity))
@@ -545,7 +541,7 @@ END_HOLD     = 10     # samples below threshold to end segment
 # Main
 # Main
 def main():
-    # --- CONFIG ---
+    #  CONFIG 
     colors = ['#1f77b4', '#ff7f0e', '#2ca02c']  # Blue, Orange, Green
     
     # Check files
@@ -553,7 +549,7 @@ def main():
     if not existing_files:
         raise FileNotFoundError("None of the provided FILES exist.")
 
-    # --- SETUP PLOT (Once) ---
+    #  SETUP PLOT (Once) 
     if PLOT:
         # WINDOW 1: Flow-Volume Loop
         fig1, ax_fv = plt.subplots(figsize=(8, 8), constrained_layout=True)
@@ -574,7 +570,7 @@ def main():
         # Ensure the table axis has no borders/ticks
         ax_metrics.axis('off')
 
-        # --- STYLING FIGURE 1 (Flow-Volume) ---
+        #  STYLING FIGURE 1 (Flow-Volume) 
         ax_fv.set_xlabel("Volume (L)", fontsize=10)
         ax_fv.set_ylabel("Flow (L/s)", fontsize=10)
         ax_fv.set_title("Flow–Volume Loop", fontsize=12)
@@ -586,11 +582,11 @@ def main():
         ax_fv.axvline(0, color='k', linewidth=1.2)
         ax_fv.grid(True, which='both', linestyle='-', alpha=0.3)
 
-        # --- STYLING FIGURE 1 (Metrics Panel) ---
+        #  STYLING FIGURE 1 (Metrics Panel) 
         ax_metrics.axis('off')
         ax_metrics.set_title("", fontsize=12)
 
-        # --- STYLING FIGURE 2 (Volume-Time) ---
+        #  STYLING FIGURE 2 (Volume-Time) 
         ax_evs.set_xlabel("Time (s)", fontsize=10)
         ax_evs.set_ylabel("Volume (L)", fontsize=10)
         ax_evs.set_title("Volume vs Time", fontsize=12)
@@ -605,7 +601,7 @@ def main():
     table_data = []
     column_headers = []
 
-    # --- LOOP THROUGH FILES ---
+    #  LOOP THROUGH FILES 
     for i, file_path in enumerate(FILES):
         trial_label = f"Trial {i+1}"
         color = colors[i % len(colors)]
@@ -657,21 +653,21 @@ def main():
         
         column_headers.append(trial_label)
 
-        # ---------------------- Measured values ---------------------- #
+        #  Measured values  #
         meas_FEV1     = metrics["FEV1"]
         meas_FVC      = metrics["FVC"]
         meas_ratio    = metrics["FEV1_FVC"]/100 if metrics["FEV1_FVC"]>0 else float("nan") # convert %→fraction
         meas_FEF2575  = extra["FEF25_75"]
         meas_FEF75    = extra["FEF75"]
 
-        # ---------------------- GLI Z-scores ------------------------- #
+        #  GLI Z-scores - #
         FEV1_z     = gli_z(meas_FEV1,    fev1_ref["L"], fev1_ref["M"], fev1_ref["S"])
         FVC_z      = gli_z(meas_FVC,     fvc_ref["L"],  fvc_ref["M"],  fvc_ref["S"])
         FEV1FVC_z  = gli_z(meas_ratio,   fev1fvc_ref["L"], fev1fvc_ref["M"], fev1fvc_ref["S"])
         FEF2575_z  = gli_z(meas_FEF2575, fef2575_ref["L"], fef2575_ref["M"], fef2575_ref["S"])
         FEF75_z    = gli_z(meas_FEF75,   fef75_ref["L"],  fef75_ref["M"],  fef75_ref["S"])
 
-        # ---------------------- push to results ---------------------- #
+        #  push to results  #
         # Update the full_stats dict that will be appended
         full_stats.update({
             "FEV1_pred": FEV1_pred,
@@ -690,7 +686,7 @@ def main():
         # Append AFTER all updates
         table_data.append(full_stats)
 
-        # --- PLOTTING (Flow–Volume Loop: Exhale + immediate Inhale) ---
+        #  PLOTTING (Flow–Volume Loop: Exhale + immediate Inhale) 
         if PLOT and metrics["s_best"] >= 0:
 
             # Forced exhale indices
@@ -711,7 +707,7 @@ def main():
             fv_vol_ex = vol[s_on:e_ex+1] - v0
             fv_flow_ex = flow[s_on:e_ex+1]
 
-            # --- TRIM unstable zero-crossing region (BACKTRACK METHOD) ---
+            #  TRIM unstable zero-crossing region (BACKTRACK METHOD) 
             # Strategy: Find the PEAK of the exhale, then walk BACKWARDS 
             # until flow drops below a cutoff. This deletes the "hesitation loop".
             if len(fv_flow_ex) > 0:
@@ -814,7 +810,7 @@ def main():
     print(f"Best FVC  → Trial {best_FVC_idx+1}: {final_FVC:.2f} L")
     print(f"Best Flow Trial (for other parameters) → Trial {best_FLOW_idx+1}")
 
-    # === [MISSING CODE] Construct the dictionaries for the table loop ===
+    #Construct the dictionaries for the table loop 
     final_vals = {
         "FEV1": final_FEV1,
         "FVC": final_FVC,
@@ -842,12 +838,12 @@ def main():
         "FEF75": final_FEF75_z,
     }
     
-    # --- FINAL TABLE GENERATION ---
+    #  FINAL TABLE GENERATION 
     if PLOT and len(table_data) > 0:
         ax_fv.legend(loc='upper right', fontsize=9)
         ax_evs.legend(loc='lower right', fontsize=9)
 
-        # --- IDENTIFY BEST TRIAL INDICES ---
+        #  IDENTIFY BEST TRIAL INDICES 
         if table_data:
             # Index of trial with best FEV1
             idx_best_fev1 = max(range(len(table_data)), key=lambda i: table_data[i].get("FEV1", -np.inf))
@@ -932,10 +928,10 @@ def main():
             # C. Best Values (ATS Selection)
             best_val = final_vals.get(data_key, np.nan)
             
-            # --- NEW: Mark the "Best Values" column red as well ---
+            #  NEW: Mark the "Best Values" column red as well 
             if not np.isnan(best_val):
                  red_cells.append((r_idx, best_val_col_idx))
-            # ----------------------------------------------------
+            # 
             
             current_row.append(fmt.format(best_val) if not np.isnan(best_val) else "-")
 
