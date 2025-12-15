@@ -27,9 +27,7 @@ import sys
 
 # USER SETTINGS 
 # EDIT THIS TO THE LOG FILE
-FILES = [r"d:\Users\Tejaswini\Desktop\neurosyn\live plotting\New method\realtime_all\f078.log",
-r"d:\Users\Tejaswini\Desktop\neurosyn\live plotting\New method\realtime_all\f066_1.log",
-r"d:\Users\Tejaswini\Desktop\neurosyn\live plotting\New method\realtime_all\un02_1.log"
+FILES = [r"d:\Users\Tejaswini\Desktop\neurosyn\live plotting\New method\realtime_all\trial.log"
 ]
 
 
@@ -976,5 +974,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
