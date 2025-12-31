@@ -11,14 +11,19 @@ import time
 from typing import List, Iterable, Tuple
 import os
 import re
-import atexit
-import binascii
 from datetime import datetime, timezone
 from pathlib import Path
+import json
 
+# Sampling period (seconds). 0.005 = 200 Hz
+DT = 0.005
+TEST_DURATION = 20.0  # < NEW: Auto-stop after 20 seconds
+
+#  GLOBAL STATE 
 last_data_time = None
+start_data_time = None  #Tracks when the first sample arrived
 end_of_test_reported = False
-IDLE_TIMEOUT_SEC = 1.0  # seconds to wait before auto-close
+IDLE_TIMEOUT_SEC = 1.0
 
 uri = "ws://localhost:8444/bleWS/"
 
@@ -53,7 +58,7 @@ def decode_pressure_from_message(message):
     if len(b) <= 119 or b[0] != 83 or b[1] != 72 or b[119] != 70:
         return []
 
-    # --- Frame-level skip logic (kept inside the function) ---
+    #  Frame-level skip logic (kept inside the function) 
     state = getattr(decode_pressure_from_message, "_skip_state", 0)  # 0: wait null, 1: skip next, 2: normal
     is_null = all(v == 0 for v in b)
 
@@ -120,7 +125,7 @@ async def ws_listener():
     except Exception as e:
         print(f"An error occurred in the WebSocket listener: {e}")
 
-LOG_FILE = r"d:\Users\Tejaswini\Desktop\neurosyn\live plotting\New method\realtime_all\forced1.log"  # ← change path if you want
+LOG_FILE = r"d:\Users\Tejaswini\Desktop\neurosyn\live plotting\New method\realtime_all\tidal_test.log"  # ← change path if you want
 os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
 
 def start_ws_thread():
@@ -140,9 +145,8 @@ ax.grid(True, alpha=0.3)
 
 # Fix the axis ranges here:
 YMIN, YMAX = -5000, 5000
-ax.set_xlim(0, 26)
+ax.set_xlim(0, 20)
 ax.set_ylim(YMIN, YMAX)
-
 
 # Sampling period (seconds). 0.005 = 200 Hz
 DT = 0.005
@@ -156,11 +160,6 @@ TRI_WINDOW   = 20    # triangular half-window; FIR length = 2*TRI_WINDOW - 1 (>=
 INIT_MEAN_N  = 150   # samples for initial mean removal
 END_MEAN_N   = 150   # samples used to estimate linear drift toward tail
 
-#Coefficients
-# 4-term basis coefficients (pull=inhale, push=exhale)
-pull_coefficients = np.array([ 0.334646, -0.001808, -0.526989,  0.498103], dtype=float)  # inhale/pull
-push_coefficients = np.array([ 1.21753e-01,  2.10000e-05,  7.26680e-02, -1.59643e-01], dtype=float)  # exhale/push
-#for device = f039
 
 #Filtering & baseline/drift 
 def triangular_weights(window: int) -> np.ndarray:
@@ -202,61 +201,72 @@ W_TRI = triangular_weights(TRI_WINDOW)
 
 # 🔁 Animation update function
 def update(_):
-    global last_data_time, end_of_test_reported  
-    WINDOW_SEC = 26  # seconds shown on x-axis
-    # get new decoded pressures from queue
+    global last_data_time, end_of_test_reported, start_data_time
+    WINDOW_SEC = 26 
+    
+    # Get new decoded pressures from queue
     got_new = False
+    now = time.time()
+    
     while True:
         try:
-            val = pressure_queue.get_nowait()   # these are already in Pascals
+            val = pressure_queue.get_nowait()
         except queue.Empty:
             break
+        
         pressures_pa.append(val)
         got_new = True
-        last_data_time = time.time()
+        last_data_time = now
+        
+        # Start the 20s timer when the FIRST packet arrives
+        if start_data_time is None:
+            start_data_time = now
+            print(f"[Realtime] Data flow started. Timer set for {TEST_DURATION} seconds.")
 
     if not pressures_pa:
         return line,
 
-    # raw rolling data
+    # ... [Keep existing filtering/plotting logic: y_raw, y0, yf, line.set_data] ...
     y_raw = np.fromiter(pressures_pa, dtype=float)
     x = np.arange(y_raw.size, dtype=float) * DT
-
-    # baseline correction
     y0, _ = remove_initial_mean(y_raw, INIT_MEAN_N)
-
-    # triangular FIR (precomputed weights)
     yf = streaming_fir(y0, W_TRI)
-    if yf.size == 0:
-        return line,
-
+    if yf.size == 0: return line,
     x_f = x[-yf.size:]
-
-    # update plot line
     line.set_data(x_f, yf)
-    # dynamic sliding time window
+    
+    # Dynamic sliding window
     if x_f[-1] > WINDOW_SEC:
         ax.set_xlim(x_f[-1] - WINDOW_SEC, x_f[-1])
     else:
         ax.set_xlim(0, WINDOW_SEC)
+        
+    # Update Title with Timer Countdown
+    if start_data_time:
+        elapsed = now - start_data_time
+        remaining = max(0, TEST_DURATION - elapsed)
+        ax.set_title(f"Real-time Pressure (Pa) — Time Remaining: {remaining:.1f}s")
+    else:
+        ax.set_title("Real-time Pressure (Pa) — Waiting for data...")
 
-    # in update() just before return line,
-    ax.set_title(f"Real-time Pressure (Pa) — samples: {len(pressures_pa)}")
+    # --- AUTO-CLOSE LOGIC ---
+    should_close = False
+    close_reason = ""
 
-    # --- auto-close once data stops coming ---
-    now = time.time()
+    # Condition A: Idle Timeout (No data for 1s)
+    if (not got_new) and last_data_time and (now - last_data_time) > IDLE_TIMEOUT_SEC:
+        should_close = True
+        close_reason = "Idle timeout (no data)"
 
-    # mark time whenever new data arrives
-    if got_new:
-        last_data_time = now
+    # Condition B: 20-Second Timer Limit (NEW)
+    if start_data_time and (now - start_data_time) > TEST_DURATION:
+        should_close = True
+        close_reason = f"Test duration limit ({TEST_DURATION}s) reached"
 
-    # if no new samples for >1 s, close the plot
-    if (not got_new) and last_data_time and (now - last_data_time) > 1.0 and not end_of_test_reported:
+    if should_close and not end_of_test_reported:
         end_of_test_reported = True
-        print("[Realtime] No new data — closing plot and running analysis…")
-
-        # schedule the figure to close so plt.show() returns cleanly
-        timer = fig.canvas.new_timer(interval=100)  # close in 0.1 s
+        print(f"[Realtime] {close_reason} — closing plot and running analysis…")
+        timer = fig.canvas.new_timer(interval=100)
         timer.add_callback(lambda: plt.close(fig))
         timer.start()
 
