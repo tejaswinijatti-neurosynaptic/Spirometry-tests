@@ -1,5 +1,5 @@
 """
-TV_fromlog.py  (no argparse)
+TV_fromlog.py 
 
 How to use:
 1) Set FILE below to your .log path.
@@ -18,7 +18,7 @@ import sys
 
 # USER SETTINGS 
 #EDIT THIS TO THE LOG FILE
-FILE = r"d:\Users\Tejaswini\Downloads\f078_tidal1.log"
+FILE = r"d:\Users\Tejaswini\Desktop\neurosyn\live plotting\New method\realtime_all\tidal_test.log"
 
 # Sampling period (seconds). 0.005 = 200 Hz
 DT = 0.005
