@@ -34,7 +34,7 @@ pressure_queue = queue.Queue()
 pressures_pa = deque(maxlen=6000)
 baseline_pressure = 0
 
-# --- NEW: JSON LOADER FUNCTION ---
+#  NEW: JSON LOADER FUNCTION 
 def load_coeffs(filename):
     # Determines the path relative to THIS script
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -54,23 +54,24 @@ def load_coeffs(filename):
         print(f"Error reading JSON {filename}: {e}")
         sys.exit(1)
 
-# --- REPLACED HARDCODED VALUES WITH LOADER ---
-print("--- Loading Coefficients ---")
+#  REPLACED HARDCODED VALUES WITH LOADER 
+print(" Loading Coefficients ")
 pull_coefficients = load_coeffs("coeffs_pull.json")
 push_coefficients = load_coeffs("coeffs_push.json")
 
-# --- NEW: knobs ---
+#  NEW: knobs 
 USE_DEADBAND = True
 USE_STATE_MACHINE = True
 
-# ==== Flow-Volume activation settings ====
+#  Flow-Volume activation settings 
 DEAD_BAND_FLOW = 0.06   # L/s below this = idle
 PRESS_THR_PA   = 15.0   # Pa threshold to trigger plotting
 START_HOLD     = 3      # consecutive samples above threshold to start
 END_HOLD       = 10      # consecutive samples below threshold to stop
 
-# ====== State holders ======
+#  State holders 
 active = False          # current state: True = ACTIVE, False = IDLE
+first_activation = True
 start_cnt = 0
 end_cnt = 0
 V_state = 0.0
@@ -89,7 +90,7 @@ GRACE_SAMPLES = 40   # ~0.2 s at 200 Hz
 below_cnt = 0
 
 # Volume–Time state (independent of FV)
-# ----- Volume–Time rolling history (no session resets) -----
+#  Volume–Time rolling history (no session resets) 
 VT_PRESS_THR   = 15.0          # use your PRESS_THR_PA or set here
 VT_START_HOLD  = 3             # to enter active
 VT_END_HOLD    = 10            # to leave active (prevents chatter)
@@ -103,7 +104,7 @@ vt_vol_hist: list[float] = []  # all volumes (rolling)
 vt_last_pf_len = 0             # processed length
 
 DT = 1/200                      
-# ==== Exhale timer (visual cue) ====
+#  Exhale timer (visual cue) 
 EXHALE_START_Pressure = 50       # L/s to *start* timer (exhale begins)
 EXHALE_END_Pressure   = -50        # L/s below this we *consider* end-phase
 EXHALE_END_HOLD_SAMPLES  = 50       # consecutive -ve pressure for end
@@ -123,7 +124,7 @@ def play_start_beep():
 def play_long_beep():
     winsound.Beep(2000, 1400)  # long beep
 
-# ---- audio state for cues ----
+#  audio state for cues 
 SHORT_BEEP_INTERVAL = 1.0      # seconds between short beeps during exhale
 
 beep_start_played      = False
@@ -199,7 +200,7 @@ def decode_pressure_from_message(message):
         print(f"DEBUG: Ignored Frame #{decode_pressure_from_message._frame_a_skip_count}")
         return []
 
-    # --- 4. DECODE ---
+    #  4. DECODE 
     # ADC/pressure conversion
     OS_dig = 2**23
     FSS_inH2O = 120.0
@@ -269,7 +270,7 @@ async def ws_listener():
     finally:
         ws_conn = None
 
-LOG_FILE = r"d:\Users\Tejaswini\Desktop\neurosyn\live plotting\New method\realtime_all\trial.log"
+LOG_FILE = r"d:\Users\Tejaswini\Desktop\neurosyn\live plotting\New method\realtime_all\qc_check_logs\brijesh_3.log"
 os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
 
 def start_ws_thread():
@@ -279,7 +280,7 @@ def start_ws_thread():
 thread = threading.Thread(target=start_ws_thread, daemon=True)
 thread.start()
 
-# ------------ Filtering + baseline (ONLY what you already use) ------------
+#  Filtering + baseline (ONLY what you already use) 
 TRI_WINDOW = 20                 # triangular half-window; FIR length = 2*TRI_WINDOW - 1 (>=2)
 INIT_MEAN_N  = 200
 
@@ -398,7 +399,7 @@ MAX_RUNTIME = 20      # seconds to auto-stop the realtime plot
 
 # 🔁 Animation update
 def update(_):
-    global last_data_time, end_of_test_reported, start_time, session_end_time, client_should_stop
+    global last_data_time, end_of_test_reported, start_time, session_end_time, client_should_stop, first_activation
     WINDOW_SEC = 26
     # ingest new pressure samples...
     got_new = False
@@ -431,12 +432,12 @@ def update(_):
     # align time to filtered length
     t_f = t[-pf.size:]
 
-    # --- LEFT: Pressure–Time
+    #  LEFT: Pressure–Time
     line_p.set_data(t_f, pf)
     ax_p.set_xlim(0, 20)
     ax_p.set_title(f"Real-time Pressure (Pa) — samples: {len(pressures_pa)}")
 
-    # --- auto-close once data stops coming ---
+    #  auto-close once data stops coming 
     global last_data_time, end_of_test_reported
     now = time.time()
 
@@ -468,7 +469,7 @@ def update(_):
         return line_p, line_fv, line_vt
 
 
-    # --- RIGHT: Volume–Flow loop ---
+    #  RIGHT: Volume–Flow loop 
     # Convert filtered pressure -> flow (per-sample push/pull), integrate -> volume
     global active, start_cnt, end_cnt, V_state, flow_last, vol_last
     global curr_v, curr_f, last_pf_len, below_cnt
@@ -478,6 +479,9 @@ def update(_):
     global beep_start_played, long_beep_played, seven_sec_beep_played
 
     flow_all = pressure_to_flow_per_sample(pf)
+    if USE_DEADBAND:
+        flow_all = np.where(np.abs(flow_all) < DEAD_BAND_FLOW, 0.0, flow_all)
+
 
     # process only the new samples since last frame
     start_idx = last_pf_len
@@ -488,7 +492,7 @@ def update(_):
         p_now = pf[i]
         f_now = flow_all[i]
 
-        # ===== Exhale timer logic (pressure-based) =====
+        #  Exhale timer logic (pressure-based) 
         # START: sustained positive pressure = exhale
         if not exhale_timer_running and not exhale_timer_done:
             if p_now >= EXHALE_START_Pressure:
@@ -532,7 +536,7 @@ def update(_):
                 # during first 1s, don't let anything stop the timer
                 exhale_end_hold_count = 0
 
-        # ===== Existing Volume–Flow state machine =====
+        #  Existing Volume–Flow state machine 
         if active:
             if abs(p_now) < PRESS_THR_PA:
                 below_cnt += 1
@@ -555,6 +559,24 @@ def update(_):
                 if start_cnt >= START_HOLD:
                     active = True
                     start_cnt = 0
+
+                    # --- LOGIC START ---
+                    if first_activation:
+                        # CASE 1: The very first inhale.
+                        # We MUST reset Volume to 0 and start at (0,0).
+                        V_state = 0.0
+                        curr_v.append(0.0)
+                        curr_f.append(0.0)
+                        first_activation = False  # Never do this again
+                        
+                    else:
+                        # CASE 2: Exhale or subsequent breaths.
+                        # Do NOT reset V_state (preserve the loop shape).
+                        # BUT, do inject a 0-flow point at the CURRENT volume.
+                        # This prevents the "jump" without resetting the volume.
+                        curr_v.append(V_state) 
+                        curr_f.append(0.0)
+            
                     # reset timer per maneuver
                     exhale_timer_running     = False
                     exhale_timer_done        = False
@@ -635,7 +657,7 @@ def update(_):
         line_vt.set_data([], [])
 
 
-        # --- session timeout handling ---
+        #  session timeout handling 
     if session_end_time is not None and not end_of_test_reported:
         now = time.time()
         if now >= session_end_time:
@@ -657,13 +679,13 @@ def update(_):
 
             threading.Timer(0.1, _safe_close).start()
 
-    # ===== Update Timer UI (EXHALE TIMER ONLY) =====
+    #  Update Timer UI (EXHALE TIMER ONLY) 
     if exhale_timer_running and exhale_start_walltime is not None:
         elapsed_exhale = time.time() - exhale_start_walltime
         exhale_last_duration_sec = elapsed_exhale
         timer_text.set_text(f"{int(elapsed_exhale)} s")
 
-        # === 7-second long beep ===
+        #  7-second long beep 
         if elapsed_exhale >= 7.0 and not seven_sec_beep_played:
             seven_sec_beep_played = True
             threading.Thread(target=play_long_beep, daemon=True).start()
@@ -673,7 +695,7 @@ def update(_):
         # exhale finished → freeze at final duration
         timer_text.set_text(f"{int(exhale_last_duration_sec)} s")
 
-        # --- FINAL LONG BEEP (once per maneuver) ---
+        #  FINAL LONG BEEP (once per maneuver) 
         if not long_beep_played:
             threading.Thread(target=play_long_beep, daemon=True).start()
             long_beep_played = True
@@ -688,7 +710,7 @@ ani = FuncAnimation(fig, update, interval=50, blit=False)
 plt.tight_layout()
 plt.show()
 
-# === run analysis after the realtime plot window is closed ===
+#  run analysis after the realtime plot window is closed 
 try:
     import os, time, importlib.util
     from datetime import datetime
@@ -698,8 +720,8 @@ try:
 
     # load forced_calculations.py from same folder (exec as module)
     here = os.path.abspath(os.path.dirname(__file__))
-    analysis_path = os.path.join(here, "forced_calculations_2plots_json.py") 
-    spec = importlib.util.spec_from_file_location("forced_calculations_2plots_json", analysis_path)
+    analysis_path = os.path.join(here, "forced_calculations_duplicate.py") 
+    spec = importlib.util.spec_from_file_location("forced_calculations_duplicate", analysis_path)
     fa = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(fa)
 
