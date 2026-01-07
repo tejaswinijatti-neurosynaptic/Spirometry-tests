@@ -14,6 +14,7 @@ from datetime import datetime
 import winsound
 import sys
 import json
+import csv  # <--- Added for CSV logging
 
 last_data_time = None
 end_of_test_reported = False
@@ -139,37 +140,17 @@ INITIAL_WINDOW_FRAMES = 10   # only apply special skipping for the first N frame
 MAX_SPECIAL_TO_SEPARATE = 5  # collect/skip at most M special frames at the start
 
 def is_special_frame_bytes(b):
-    """
-    Heuristic to detect your Frame A vs Frame B.
-    Observations from your examples:
-      - header bytes [0..5] are common
-      - Frame A has b[6] == 0x00 while Frame B had b[6] == 0x01
-      - Frame A payload contains many zero bytes shortly after header in the sample region
-    Heuristic used here:
-      - require length >= 120 (your header guard)
-      - b[6] == 0x00 AND the number of zero bytes in the payload region (7..106) is high
-    This is intentionally conservative; adjust thresholds if you see false positives/negatives.
-    """
     if len(b) < 120:
         return False
-    # quick discriminant seen in examples
     if b[6] != 0x00:
         return False
-    # count zeros in the main payload area (exclude header/trailer)
     payload = b[7:107]
     zero_count = sum(1 for x in payload if x == 0)
-    # threshold: >60% zeros in payload (you can lower or raise this)
     return zero_count >= int(0.60 * len(payload))
 
 import re
 
 def decode_pressure_from_message(message):
-    """
-    Decodes pressure. 
-    Includes a 'Startup Gate' that nukes the first 10 'Frame A' types
-    (identified by byte[6] == 0x00).
-    """
-    # 1. Regex Parse
     m = re.search(r'\[([0-9A-Fa-f:]+)\]', message)
     if not m:
         return []
@@ -179,55 +160,41 @@ def decode_pressure_from_message(message):
     except ValueError:
         return []
 
-    # 2. Basic Sanity/Header Check
-    # Must start with S (83), H (72) and end with F (70)
-    # Frame A and B BOTH pass this, so we check this first to filter total garbage.
     if len(b) <= 119 or b[0] != 83 or b[1] != 72 or b[119] != 70:
         return []
 
-    #3. STARTUP GATE
-    # Initialize a static counter if it doesn't exist
     if not hasattr(decode_pressure_from_message, "_frame_a_skip_count"):
         decode_pressure_from_message._frame_a_skip_count = 0
 
-    # DIFFERENTIATOR: Check byte 6-13. 
-    # Frame A has 0x00. Frame B has 0x01.
     grabage_frame = (b[i] == 0 for i in range(7,14)) 
 
-    # Logic: If it's Frame A, AND we haven't skipped 10 of them yet... YEET IT.
     if grabage_frame and decode_pressure_from_message._frame_a_skip_count < 5:
         decode_pressure_from_message._frame_a_skip_count += 1
         print(f"DEBUG: Ignored Frame #{decode_pressure_from_message._frame_a_skip_count}")
         return []
 
-    #  4. DECODE 
-    # ADC/pressure conversion
     OS_dig = 2**23
     FSS_inH2O = 120.0
     INH2O_TO_PA = 249.089
 
     out = []
-    i = 7  # skip header
+    i = 7
     while i < 107 and (i + 4) < len(b):
         b2 = b[i+2] & 0xFF
         b1 = b[i+3] & 0xFF
         b0 = b[i+4] & 0xFF
         decimal_count = (b2 << 16) | (b1 << 8) | b0
-        
-        # Avoid division by zero if calc gets weird, though unlikely with these constants
         p_inH2O = 1.25 * ((decimal_count - OS_dig) / (2**24)) * FSS_inH2O
         out.append(p_inH2O * INH2O_TO_PA)
         i += 5
 
     return out
 
-# small helper to inspect stored initial special frames later
 def get_initial_special_frames():
     s = getattr(decode_pressure_from_message, "_state", None)
     if not s:
         return []
     return s["initial_special_frames"]
-
 
 # 🔌 WebSocket listener running in a background thread
 async def ws_listener():
@@ -244,17 +211,14 @@ async def ws_listener():
 
             with open(LOG_FILE, "a", buffering=1, encoding="utf-8") as f:
                 async for message in websocket:
-                    # check if main thread asked us to stop the session
                     if client_should_stop:
                         try:
-                            # polite stop command (vendor specific — harmless if unsupported)
                             await websocket.send("stopScanFromHtml")
                         except Exception:
                             pass
                         print("[ws_listener] client requested stop — closing ws.")
                         break
 
-                    # log everything exactly as received
                     f.write(message.strip() + "\n")
 
                     if message.startswith("spirodata~"):
@@ -270,8 +234,10 @@ async def ws_listener():
     finally:
         ws_conn = None
 
-LOG_FILE = r"d:\Users\Tejaswini\Desktop\neurosyn\live plotting\New method\realtime_all\qc_check_logs\brijesh_3.log"
+LOG_FILE = r"d:\Users\Tejaswini\Desktop\neurosyn\live plotting\New method\realtime_all\qc_check_logs\forced_trial.log"
 os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+
+print("Time(s) | Pressure(Pa) | FV_Flow(L/s) | FV_Vol(L) | VT_Vol(L)")
 
 def start_ws_thread():
     asyncio.run(ws_listener())
@@ -400,6 +366,8 @@ MAX_RUNTIME = 20      # seconds to auto-stop the realtime plot
 # 🔁 Animation update
 def update(_):
     global last_data_time, end_of_test_reported, start_time, session_end_time, client_should_stop, first_activation
+    global csv_writer, csv_file_handle 
+
     WINDOW_SEC = 26
     # ingest new pressure samples...
     got_new = False
@@ -445,32 +413,24 @@ def update(_):
     if got_new:
         last_data_time = now
 
-    # if no new samples for >1 s, close the plot
     if (not got_new) and last_data_time and (now - last_data_time) > 1.0 and not end_of_test_reported:
         end_of_test_reported = True
         print("[Realtime] No new data — closing plot and running analysis…")
-
-        # schedule the figure to close so plt.show() returns cleanly
-                # stop the animation and close safely using a Python timer
         try:
             if 'ani' in globals() and hasattr(ani, 'event_source'):
                 ani.event_source.stop()
         except Exception:
             pass
-
         def _safe_close():
             try:
                 plt.close(fig)
             except Exception:
                 pass
-
         threading.Timer(0.1, _safe_close).start()
-
         return line_p, line_fv, line_vt
 
 
     #  RIGHT: Volume–Flow loop 
-    # Convert filtered pressure -> flow (per-sample push/pull), integrate -> volume
     global active, start_cnt, end_cnt, V_state, flow_last, vol_last
     global curr_v, curr_f, last_pf_len, below_cnt
     global exhale_timer_running, exhale_timer_done
@@ -482,42 +442,42 @@ def update(_):
     if USE_DEADBAND:
         flow_all = np.where(np.abs(flow_all) < DEAD_BAND_FLOW, 0.0, flow_all)
 
-
     # process only the new samples since last frame
     start_idx = last_pf_len
     if start_idx < 0 or start_idx > pf.size:
         start_idx = 0
+
+    # Buffer to hold Flow-Volume data specifically for logging
+    # We want to know exactly what the loop decided for each sample in this chunk
+    chunk_fv_data = [] # Stores tuple (Flow_Val, Vol_Val) or (None, None)
 
     for i in range(start_idx, pf.size):
         p_now = pf[i]
         f_now = flow_all[i]
 
         #  Exhale timer logic (pressure-based) 
-        # START: sustained positive pressure = exhale
         if not exhale_timer_running and not exhale_timer_done:
             if p_now >= EXHALE_START_Pressure:
                 exhale_start_press_count += 1
                 if exhale_start_press_count >= EXHALE_START_HOLD_SAMPLES:
                     exhale_timer_running     = True
+                    
+                    #NEW: PRINT TIMER START
+                    print(f"\n[EVENT] Timer STARTED (Sustained Pressure > {EXHALE_START_Pressure})")
+
                     exhale_start_walltime    = time.time()
                     exhale_last_duration_sec = 0.0
                     exhale_end_hold_count    = 0
-
-                    # reset audio state for this maneuver
                     beep_start_played   = False
                     long_beep_played    = False
                     seven_sec_beep_played = False
-
-                    # START CUE: play start beep once (non-blocking)(only once per exhale)
+                    
                     if not beep_start_played:
                         threading.Thread(target=play_start_beep, daemon=True).start()
                         beep_start_played = True
+                        # NEW: PRINT FIRST BEEP
+                        print("[EVENT]First Beep Triggered (Start)")
 
-            else:
-                # broke the positive run
-                exhale_start_press_count = 0
-
-        #END: after min exhale time, sustained negative pressure = inhale
         elif exhale_timer_running:
             now     = time.time()
             elapsed = now - exhale_start_walltime if exhale_start_walltime is not None else 0.0
@@ -529,14 +489,17 @@ def update(_):
                         exhale_timer_running     = False
                         exhale_timer_done        = True
                         exhale_last_duration_sec = elapsed
+                        
+                        # NEW: PRINT TIMER STOP
+                        print(f"[EVENT] Timer STOPPED (Duration: {elapsed:.2f}s)")
                 else:
-                    # not consistently inhale → reset end counter
                     exhale_end_hold_count = 0
             else:
-                # during first 1s, don't let anything stop the timer
                 exhale_end_hold_count = 0
 
-        #  Existing Volume–Flow state machine 
+        #  Volume–Flow state machine 
+        should_record_fv = False # Flag for logging
+
         if active:
             if abs(p_now) < PRESS_THR_PA:
                 below_cnt += 1
@@ -546,106 +509,130 @@ def update(_):
             if below_cnt >= max(END_HOLD, GRACE_SAMPLES):
                 active = False
                 below_cnt = 0
-                # do NOT clear buffers here
             else:
                 V_state += f_now * DT
                 flow_last = f_now
                 vol_last  = V_state
                 curr_v.append(vol_last)
                 curr_f.append(flow_last)
+                should_record_fv = True # <- ACTIVE DATA
         else:
             if abs(p_now) >= PRESS_THR_PA:
                 start_cnt += 1
                 if start_cnt >= START_HOLD:
                     active = True
                     start_cnt = 0
-
-                    # --- LOGIC START ---
                     if first_activation:
-                        # CASE 1: The very first inhale.
-                        # We MUST reset Volume to 0 and start at (0,0).
                         V_state = 0.0
                         curr_v.append(0.0)
                         curr_f.append(0.0)
-                        first_activation = False  # Never do this again
-                        
+                        first_activation = False
                     else:
-                        # CASE 2: Exhale or subsequent breaths.
-                        # Do NOT reset V_state (preserve the loop shape).
-                        # BUT, do inject a 0-flow point at the CURRENT volume.
-                        # This prevents the "jump" without resetting the volume.
                         curr_v.append(V_state) 
                         curr_f.append(0.0)
-            
-                    # reset timer per maneuver
+                    
                     exhale_timer_running     = False
                     exhale_timer_done        = False
                     exhale_start_walltime    = None
                     exhale_last_duration_sec = 0.0
                     exhale_end_hold_count    = 0
                     exhale_start_press_count = 0
-
-                    # reset audio per maneuver
                     beep_start_played   = False
                     long_beep_played    = False
+                    
+                    should_record_fv = True # <--- START TRIGGERED
             else:
                 start_cnt = 0
 
+        # Store result for this sample for CSV logging
+        if should_record_fv:
+            # If active, store actual values
+            # (Use '0.0' for flow if we just triggered start, effectively)
+            val_f = flow_last if active else 0.0 
+            val_v = vol_last if active else V_state
+            chunk_fv_data.append( (val_f, val_v) )
+        else:
+            # If inactive, store None implies empty cell in CSV
+            chunk_fv_data.append( (None, None) )
 
-    # remember how far we processed
+
     last_pf_len = pf.size
 
-    # draw ALL accumulated points (not just one)
     if curr_v:
         line_fv.set_data(np.asarray(curr_v), np.asarray(curr_f))
     else:
         line_fv.set_data([], [])
 
-    #CUMULATIVE VOLUME–TIME PLOT UPDATE
+    #CUMULATIVE VOLUME–TIME PLOT UPDATE + CSV WRITING
     global vt_active, vt_above_cnt, vt_quiet_cnt, vt_V, vt_t_hist, vt_vol_hist, vt_last_pf_len
 
     i0 = vt_last_pf_len
     if i0 < 0 or i0 > pf.size:
         i0 = 0
+    
+    csv_rows = []
 
     for i in range(i0, pf.size):
         p  = pf[i]
         f  = flow_all[i]
         ti = t_f[i]
 
-        # hysteresis state (no buffer resets!)
+        # VT Logic
         if vt_active:
             if abs(p) >= VT_PRESS_THR:
                 vt_quiet_cnt = 0
-                # integrate only when above threshold
                 vt_V += -(f * DT)
             else:
                 vt_quiet_cnt += 1
-                # hold vt_V (no integration) while below threshold
                 if vt_quiet_cnt >= VT_END_HOLD:
                     vt_active = False
                     vt_quiet_cnt = 0
-            # append a point every sample so time advances flat while holding
             vt_t_hist.append(ti)
             vt_vol_hist.append(vt_V)
 
         else:
-            # currently idle → look for start
             if abs(p) >= VT_PRESS_THR:
                 vt_above_cnt += 1
                 if vt_above_cnt >= VT_START_HOLD:
                     vt_active = True
                     vt_above_cnt = 0
-                    # DO NOT reset vt_V or history here — we want all peaks to stay
-                    # immediate integration for this sample since we just turned active
                     vt_V += f * DT
             else:
                 vt_above_cnt = 0
-            # append even while idle so plot shows flat zero (or last value)
             vt_t_hist.append(ti)
             vt_vol_hist.append(vt_V)
 
+        # We need the FV data from the first loop.
+        # Calculate relative index:
+        rel_idx = i - i0
+        
+        # Get FV values if they exist for this sample
+        fv_f_str = ""
+        fv_v_str = ""
+        
+        if rel_idx < len(chunk_fv_data):
+            f_val, v_val = chunk_fv_data[rel_idx]
+            if f_val is not None:
+                fv_f_str = f"{f_val:.4f}"
+                fv_v_str = f"{v_val:.4f}"
+        
+        # Row format: Time, Pressure, FV_Flow, FV_Volume, VT_Volume
+        csv_rows.append([
+            f"{ti:.4f}",
+            f"{p:.2f}",
+            fv_f_str,    # Only filled if active
+            fv_v_str,    # Only filled if active
+            f"{vt_V:.4f}" # Always filled
+        ])
+
     vt_last_pf_len = pf.size
+    
+    # Print to Terminal
+    if csv_rows:
+        for row in csv_rows:
+            # row is a list: [Time, Pressure, FV_Flow, FV_Volume, VT_Volume]
+            # We join them with commas or pipes for readability
+            print(f"{row[0]}, {row[1]}, {row[2]}, {row[3]}, {row[4]}")
 
     # draw last 26 s of the rolling history
     win = int(26 / DT)
@@ -657,51 +644,48 @@ def update(_):
         line_vt.set_data([], [])
 
 
-        #  session timeout handling 
+    #  session timeout handling 
     if session_end_time is not None and not end_of_test_reported:
         now = time.time()
         if now >= session_end_time:
             end_of_test_reported = True
             print(f"[Realtime] Session time reached {SESSION_MAX_SEC}s — stopping data collection and closing plot.")
             client_should_stop = True
-
             try:
                 if 'ani' in globals() and hasattr(ani, 'event_source'):
                     ani.event_source.stop()
             except Exception:
                 pass
-
             def _safe_close():
                 try:
                     plt.close(fig)
                 except Exception:
                     pass
-
             threading.Timer(0.1, _safe_close).start()
 
-    #  Update Timer UI (EXHALE TIMER ONLY) 
+    #  Update Timer UI 
     if exhale_timer_running and exhale_start_walltime is not None:
         elapsed_exhale = time.time() - exhale_start_walltime
         exhale_last_duration_sec = elapsed_exhale
         timer_text.set_text(f"{int(elapsed_exhale)} s")
-
-        #  7-second long beep 
+        
+        # 7-second beep
         if elapsed_exhale >= 7.0 and not seven_sec_beep_played:
             seven_sec_beep_played = True
             threading.Thread(target=play_long_beep, daemon=True).start()
-
+            #  NEW: PRINT 7s BEEP 
+            print("[EVENT]Second Beep Triggered (7s Mark)")
 
     elif exhale_timer_done:
-        # exhale finished → freeze at final duration
         timer_text.set_text(f"{int(exhale_last_duration_sec)} s")
-
-        #  FINAL LONG BEEP (once per maneuver) 
+        
+        # Final beep (End of maneuver)
         if not long_beep_played:
             threading.Thread(target=play_long_beep, daemon=True).start()
             long_beep_played = True
-
+            # NEW: PRINT END BEEP
+            print("[EVENT] ♫ Final Beep Triggered (Maneuver Complete)")
     else:
-        # no exhale yet → show 0 s
         timer_text.set_text("0 s")
 
     return line_p, line_fv, line_vt
@@ -720,8 +704,8 @@ try:
 
     # load forced_calculations.py from same folder (exec as module)
     here = os.path.abspath(os.path.dirname(__file__))
-    analysis_path = os.path.join(here, "forced_calculations_duplicate.py") 
-    spec = importlib.util.spec_from_file_location("forced_calculations_duplicate", analysis_path)
+    analysis_path = os.path.join(here, "forced_calculations.py") 
+    spec = importlib.util.spec_from_file_location("forced_calculations", analysis_path)
     fa = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(fa)
 
