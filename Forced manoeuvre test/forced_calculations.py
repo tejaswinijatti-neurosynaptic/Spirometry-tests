@@ -17,11 +17,12 @@ import matplotlib.pyplot as plt
 import json
 import sys
 from scipy.signal import find_peaks
+import csv
 
 #  IMPORT GLI REFERENCES 
-# Ensure 'GLI_2012_referencevalues_inputchangeinside.py' is in the same folder
+# Ensure 'GLI_2012_referencevalues.py' is in the same folder
 try:
-    from GLI_2012_referencevalues_inputchangeinside import (
+    from GLI_2012_referencevalues import (
         equations, fev1_males, fev1_females, fvc_females, fvc_males, 
         fev1fvc_males, fev1fvc_females, fef2575_females, fef2575_males, 
         fef75_females, fef75_males
@@ -31,7 +32,7 @@ except ImportError:
     sys.exit(1)
 
 #  USER SETTINGS 
-FILES = [r"d:\Users\Tejaswini\Desktop\neurosyn\live plotting\New method\realtime_all\qc_check_logs\trial.log",
+FILES = [r"d:\Users\Tejaswini\Desktop\neurosyn\live plotting\New method\realtime_all\qc_check_logs\extra_segment_2.log"
          ]
 
 # Sampling period (seconds). 0.005 = 200 Hz
@@ -705,7 +706,6 @@ def main():
         pf = preprocess_one(p_raw)
         t = np.arange(pf.size) * DT
 
-        #  FIX: INDENTATION CORRECTED HERE 
         starts, ends = detect_segments(
             pf,
             deadband=100,
@@ -720,18 +720,16 @@ def main():
         metrics = compute_exhale_metrics(flow, vol, starts, ends, DT)
 
         s_best = metrics["s_best"]
-        e_best = metrics["e_best"]     # ← ORIGINAL segment end
+        e_best = metrics["e_best"]
         s_on   = metrics["s_on"]
 
-        # NOW extend exhale
+        # Extend exhale
         s_in, e_in = find_next_inhale(starts, ends, flow, e_best)
-
         if s_in is not None:
             e_exhale = s_in - 1
         else:
             e_exhale = len(flow) - 1
 
-        # STORE IT
         metrics["e_exhale"] = e_exhale
         metrics["s_in"] = s_in
 
@@ -741,6 +739,7 @@ def main():
         if qc["status"] == "FAIL":
             print(f"  QC FAIL: {qc['codes']}")
 
+        # Store stats for the table later
         full_stats = {**metrics, **extra}
         full_stats.update({
             "QC_STATUS": qc["status"],
@@ -756,47 +755,114 @@ def main():
         })
         table_data.append(full_stats)
 
-        if PLOT:
-            s_on = metrics.get("s_on", -1); e_ex = metrics.get("e_exhale", -1)
-            if s_on >= 0 and e_ex >= 0:
-                v0 = vol[s_on]
-                fv_vol_ex = vol[s_on:e_ex+1] - v0
-                fv_flow_ex = flow[s_on:e_ex+1]
+        #  PREPARE DATA BUFFERS FOR CSV & PLOTTING
+        # Initialize lists with None (empty) for the whole duration
+        csv_flow_fv = [None] * len(t)
+        csv_vol_fv  = [None] * len(t)
+        csv_vol_vt  = [None] * len(t)
 
-                if len(fv_flow_ex) > 0:
-                    idx_peak = np.argmax(fv_flow_ex)
-                    cutoff_flow = 0.10 * fv_flow_ex[idx_peak]
-                    start_trim_idx = 0
-                    for k in range(idx_peak, -1, -1):
-                        if fv_flow_ex[k] < cutoff_flow:
-                            start_trim_idx = k + 1; break
-                    fv_flow_ex = fv_flow_ex[start_trim_idx:]
-                    fv_vol_ex = fv_vol_ex[start_trim_idx:]
-                    if len(fv_vol_ex) > 0:
-                         vol_offset = (fv_flow_ex[0] * DT) / 2.0
-                         fv_vol_ex = (fv_vol_ex - fv_vol_ex[0]) + vol_offset
-                         fv_flow_ex = np.insert(fv_flow_ex, 0, 0.0)
-                         fv_vol_ex  = np.insert(fv_vol_ex, 0, 0.0)
+        s_on = metrics.get("s_on", -1)
+        e_ex = metrics.get("e_exhale", -1)
 
-                s_in, e_in = None, None
-                for ss, ee in zip(starts, ends):
-                    if ss > e_ex and np.nanmean(flow[ss:ee+1]) < 0:
-                        s_in, e_in = ss, ee; break
+        if s_on >= 0 and e_ex >= 0:
+            # 1. PREPARE FV LOOP DATA (Exhale + Inhale) 
+            v0 = vol[s_on]
+            raw_vol_ex = vol[s_on:e_ex+1] - v0
+            raw_flow_ex = flow[s_on:e_ex+1]
+
+            # Apply Trimming (same as plot)
+            if len(raw_flow_ex) > 0:
+                idx_peak = np.argmax(raw_flow_ex)
+                cutoff_flow = 0.10 * raw_flow_ex[idx_peak]
+                start_trim_idx = 0
+                for k in range(idx_peak, -1, -1):
+                    if raw_flow_ex[k] < cutoff_flow:
+                        start_trim_idx = k + 1; break
                 
-                if s_in:
-                    fv_vol = np.concatenate([fv_vol_ex, vol[s_in:e_in+1] - v0])
-                    fv_flow = np.concatenate([fv_flow_ex, flow[s_in:e_in+1]])
-                else:
-                    fv_vol, fv_flow = fv_vol_ex, fv_flow_ex
+                trimmed_flow = raw_flow_ex[start_trim_idx:]
+                trimmed_vol  = raw_vol_ex[start_trim_idx:]
+
+                # Apply Offset
+                if len(trimmed_vol) > 0:
+                    vol_offset = (trimmed_flow[0] * DT) / 2.0
+                    final_vol_ex = (trimmed_vol - trimmed_vol[0]) + vol_offset
+                    final_flow_ex = trimmed_flow 
+
+                    # Save Exhale to CSV buffers
+                    abs_start = s_on + start_trim_idx
+                    for k in range(len(final_vol_ex)):
+                        if abs_start + k < len(t):
+                            csv_flow_fv[abs_start + k] = final_flow_ex[k]
+                            csv_vol_fv[abs_start + k]  = final_vol_ex[k]
+
+            # Append Inhale (if exists)
+            s_in, e_in = None, None
+            for ss, ee in zip(starts, ends):
+                if ss > e_ex and np.nanmean(flow[ss:ee+1]) < 0:
+                    s_in, e_in = ss, ee; break
+            
+            if s_in:
+                inhale_vol = vol[s_in:e_in+1] - v0
+                inhale_flow = flow[s_in:e_in+1]
+                for k in range(len(inhale_vol)):
+                    if s_in + k < len(t):
+                        csv_flow_fv[s_in + k] = inhale_flow[k]
+                        csv_vol_fv[s_in + k]  = inhale_vol[k]
+
+            #  2. PREPARE VOL-TIME DATA (Exhale Only) 
+            # Strictly matches the "Best Trial" Volume-Time graph
+            if len(raw_vol_ex) > 0:
+                vt_data = np.maximum.accumulate(raw_vol_ex)
+                for k in range(len(vt_data)):
+                    if s_on + k < len(t):
+                        csv_vol_vt[s_on + k] = vt_data[k]
+
+        #  GENERATE SEPARATE CSV FOR THIS TRIAL
+        # Logic: input "data/test1.log" -> output "data/test1.csv"
+        csv_filename = os.path.splitext(file_path)[0] + ".csv"
+        
+        try:
+            with open(csv_filename, mode='w', newline='') as f:
+                writer = csv.writer(f)
+                # Header requested by user
+                writer.writerow(["Time_s", "Pressure_Pa", "FV_Flow_Lps", "FV_Volume_L", "VT_Volume_Exhale_L"])
                 
+                # Format helper: 4 decimals, empty string if None
+                def fmt(val, p=4): return f"{val:.{p}f}" if val is not None else ""
+
+                for idx in range(len(t)):
+                    writer.writerow([
+                        fmt(t[idx]),            # Continuous Time
+                        f"{pf[idx]:.2f}",       # Continuous Pressure
+                        fmt(csv_flow_fv[idx]),  # Sparse FV Flow
+                        fmt(csv_vol_fv[idx]),   # Sparse FV Volume
+                        fmt(csv_vol_vt[idx])    # Sparse VT Volume (Exhale only)
+                    ])
+            print(f"  [CSV Saved] {csv_filename}")
+        except Exception as e:
+            print(f"  [CSV Error] {e}")
+
+        #  PLOTTING (Reusing the CSV buffers for consistency)
+        if PLOT and s_on >= 0 and e_ex >= 0:
+            # Filter None to get clean lines for matplotlib
+            plot_fv_vol = [v for v in csv_vol_fv if v is not None]
+            plot_fv_flow = [v for v in csv_flow_fv if v is not None]
+            plot_vt_vol = [v for v in csv_vol_vt if v is not None]
+            
+            # X-axis for Vol-Time graph (Relative time starting at 0 for the exhale)
+            t_exhale = t[s_on:e_ex+1] - t[s_on]
+
+            # Plot Flow-Volume
+            if len(plot_fv_vol) > 0:
                 qc_failed = (qc["status"] == "FAIL")
-                ax_fv.plot(fv_vol, fv_flow, ls="--" if qc_failed else "-", alpha=0.7 if qc_failed else 1.0, 
-                           color=color, label=f"{trial_label} {qc['codes'] if qc_failed else ''}")
-                
-                t_exhale = t[s_on:e_ex+1] - t[s_on]
-                vol_exhale = np.maximum.accumulate(vol[s_on:e_ex+1] - vol[s_on])
-                ax_evs.plot(t_exhale, vol_exhale, lw=1.5, color=color, label=trial_label)
-
+                ax_fv.plot(plot_fv_vol, plot_fv_flow, ls="--" if qc_failed else "-", 
+                           alpha=0.7 if qc_failed else 1.0, color=color, 
+                           label=f"{trial_label} {qc['codes'] if qc_failed else ''}")
+            
+            # Plot Volume-Time (Exhale only)
+            if len(plot_vt_vol) > 0:
+                limit = min(len(t_exhale), len(plot_vt_vol))
+                ax_evs.plot(t_exhale[:limit], plot_vt_vol[:limit], lw=1.5, color=color, label=trial_label)
     if not table_data:
         print("No valid spirometry data processed.")
         return
