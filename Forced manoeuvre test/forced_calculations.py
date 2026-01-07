@@ -32,7 +32,7 @@ except ImportError:
     sys.exit(1)
 
 #  USER SETTINGS 
-FILES = [r"d:\Users\Tejaswini\Desktop\neurosyn\live plotting\New method\realtime_all\qc_check_logs\extra_segment_2.log"
+FILES = [r"d:\Users\Tejaswini\Desktop\neurosyn\live plotting\New method\realtime_all\qc_check_logs\brijesh_3.log",
          ]
 
 # Sampling period (seconds). 0.005 = 200 Hz

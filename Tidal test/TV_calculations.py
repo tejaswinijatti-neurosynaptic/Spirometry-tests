@@ -1,5 +1,5 @@
 """
-TV_fromlog.py 
+TV_fromlog.py  (no argparse)
 
 How to use:
 1) Set FILE below to your .log path.
@@ -15,10 +15,11 @@ import numpy as np
 import matplotlib.pyplot as plt
 import json
 import sys
+from pathlib import Path
 
 # USER SETTINGS 
 #EDIT THIS TO THE LOG FILE
-FILE = r"d:\Users\Tejaswini\Desktop\neurosyn\live plotting\New method\realtime_all\tidal_test.log"
+FILE = Path("realtime_all") / "tidal_test.log"
 
 # Sampling period (seconds). 0.005 = 200 Hz
 DT = 0.005
@@ -323,8 +324,47 @@ def run_one(file_path: str):
         plt.tight_layout()
         plt.show()
 
+def calculateFinalTV(p_raw: np.ndarray):  
+    # 1) load & preprocess
+    p_corr = preprocess_one(p_raw)
+
+    # 2) per-segment volumes with direction-based coeffs
+    inh, exh, dbg = compute_segment_volumes(
+        p_corr, dt=DT, deadband=DEADBAND, tail_ignore=TAIL_IGNORE
+    )
+
+    mean_inh, std_inh, n_inh = tidy_stats(inh)
+    mean_exh, std_exh, n_exh = tidy_stats(exh)
+
+    # 3) final tidal volume: average of inhale mean and exhale mean
+    if np.isfinite(mean_inh) and np.isfinite(mean_exh):
+        TV = 0.5 * (mean_inh + mean_exh)
+        tv_note = "TV = average(mean_inhale, mean_exhale)"
+    elif np.isfinite(mean_inh):
+        TV = mean_inh
+        tv_note = "Only inhale segments found; TV = mean_inhale"
+    elif np.isfinite(mean_exh):
+        TV = mean_exh
+        tv_note = "Only exhale segments found; TV = mean_exhale"
+    else:
+        TV = float("nan")
+        tv_note = "No valid segments found"
+
+    # 4) report
+    print("\nTidal Volume Report")
+    print(f"File: RealTimeData Received for TV calculation")
+    print(f"Samples (raw): {len(p_raw)}, Samples (filtered): {len(p_corr)}")
+    print(f"Segments found: inhales={n_inh}, exhales={n_exh}")
+    if np.isfinite(mean_inh):
+        print(f"Inhale peaks:  mean={mean_inh:.3f} L, std={std_inh:.3f} L, n={n_inh}")
+    else:
+        print("Inhale peaks:  none")
+    if np.isfinite(mean_exh):
+        print(f"Exhale peaks:  mean={mean_exh:.3f} L, std={std_exh:.3f} L, n={n_exh}")
+    else:
+        print("Exhale peaks:  none")
+    print(f"\nFinal TV: {TV:.3f} L  ({tv_note})")
 
 #ENTRY POINT
 if __name__ == "__main__":
     run_one(FILE)
-
