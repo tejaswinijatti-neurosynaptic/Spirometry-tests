@@ -1,0 +1,33 @@
+STEPS TO BUILD APPLICATION
+I) pyinstaller --onedir .\OR_App.py
+II) Go to the location where the build has been generated(path can be seen in build logs)
+III) Inside dist/OR_App, create zip of "_internal" folder and move this folder and .exe in src/resources/ of SDK 
+
+Python Version 3.12.10
+pip Version 25.1.1 
+numpy Version: 2.2.6 
+
+pip install opencv-python matplotlib scipy colormath
+
+Error 
+ File "C:\Users\Mangesh Sirkare\AppData\Local\Programs\Python\Python312\Lib\site-packages\colormath\color_diff.py", line 79, in delta_e_cie2000
+    return numpy.asscalar(delta_e)
+           ^^^^^^^^^^^^^^
+  File "C:\Users\Mangesh Sirkare\AppData\Local\Programs\Python\Python312\Lib\site-packages\numpy\__init__.py", line 427, in __getattr__
+    raise AttributeError("module {!r} has no attribute "
+AttributeError: module 'numpy' has no attribute 'asscalar'. Did you mean: 'isscalar'?
+
+Patch the library code locally (recommended)
+Manually fix the installed file:
+
+Open this file in a text/code editor:
+
+C:\Users\Mangesh Sirkare\AppData\Local\Programs\Python\Python312\Lib\site-packages\colormath\color_diff.py
+Go to line 79, and change:
+
+return numpy.asscalar(delta_e)
+➜ to:
+
+return delta_e.item()
+
+Save the file and re-run your script.

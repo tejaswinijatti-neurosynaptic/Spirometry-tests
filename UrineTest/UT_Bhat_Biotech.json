@@ -1,0 +1,557 @@
+{
+    "serialNo" : 1,
+    "TEST NAME" : "Urine test",
+    "testType" : "10-parameter",
+    "Manufacturer Name" : "Bhat Biotech",
+    "classOfTest" : "Antigen",
+    "cassetteWidth": 27,
+    "cassetteHeight" : 639,
+    "cassetteHeight_Lower" : 600,
+    "cassetteHeight_Higher" : 650,
+    "operatingMode" : "confirmed",
+    "digitalSignature" : "alphanumeric String",
+    "numberOfpads" : 10,
+    "timearray" :[60],
+    "standarddeviation_Lower":37,
+    "standarddeviation_Higher":40,
+    "croppedstrip_coordinates": "10,10,437,57",
+    "croppedstrip_Width": 37,
+    "croppedstrip_Height": 450,
+    "standarddeviaton_cropped": 31,
+    "pads" : [
+        {
+            "serialNo" : 1,
+            "parametername" : "blood",
+            "testType" : "Antigen",
+            "rotation" : 0,
+            "resultWindowCoor" : "11,570 , 61,820",
+            "cropMarginHorizontal" : 10,
+            "cropMarginVertical" : 10,
+            "readTime" : 60,
+            "expireReadTime" : 65,
+            "lineSmoothing" : 25,
+            "signalChannel" : "r,g,b",
+            "L,a,bvalues" : "68.299515 7.3921204 34.97371",
+            "numberofpossibilities" : 4,
+            "patchdetails" : [
+                
+                {
+                    "bloodvalue":"-",
+                    "L,a,bvalues": [53.91257546,	-10.79289773,	31.7875
+
+]
+                    
+                },
+                {
+                    "bloodvalue":"10",
+                    "L,a,bvalues": [55.16762435	,-6.385416667,	37.241875
+]
+                    
+                },
+                {
+                    "bloodvalue":"50",
+                    "L,a,bvalues": [45.58865479,-6.5446875,	34.08203125
+]
+                    
+                },
+                {
+                    "bloodvalue":"250",
+                    "L,a,bvalues": [35.61401367,-13.83854167,	18.22916667
+]
+                    
+                }
+                
+            ]
+        },
+        { 
+            "serialNo" : 2,
+            "parametername" : "bilirubin",
+            "testType" : "Antigen",
+            "rotation" : 0,
+            "resultWindowCoor" : "11,890 ,61,940 ",
+            "cropMarginHorizontal" : 10,
+            "cropMarginVertical" : 10,
+            "readTime" : 60,
+            "expireReadTime" : 65,
+            "signalChannel" : "r,g,b",
+            "L,a,bvalues" : "68.299515 7.3921204 34.97371",
+            "unit" :"mg/dL",
+            "numberofpossibilities" : 4,
+            "patchdetails" : [
+                {
+                    "bilirubinvalue":"-",
+                    "L,a,bvalues": [61.99895685,	-8.966476364,	18.20399306
+]
+                },
+                {
+                    "bilirubinvalue":"0.5",
+                    "L,a,bvalues": [65.0449237,	-3.979158333,	11.11979167
+
+]
+                },
+                {
+                    "bilirubinvalue":"1",
+                    "L,a,bvalues": [57.9525	,-4.898375,	10.2028125
+
+]
+                },
+                {
+                    "bilirubinvalue":"3",
+                    "L,a,bvalues": [33.76464844,	-7.838541667,	13.00520833
+]
+
+                }
+                
+                
+            ]
+
+        },
+          {
+            "serialNo" : 3,
+            "parametername" : "urobilinogen",
+            "testType" : "Antigen",
+            "rotation" : 0,
+            "resultWindowCoor" : "11,250 , 61,290",
+            "cropMarginHorizontal" : 10,
+            "cropMarginVertical" : 10,
+            "readTime" : 60,
+            "expireReadTime" : 65,
+            "signalChannel" : "r,g,b",
+            "L,a,bvalues" : "68.299515 7.3921204 34.97371",
+            "numberofpossibilities" : 6,
+            "patchdetails" : [
+                {
+                    "urobilinogenvalue":"-",
+                    "L,a,bvalues": [54.08802379,-6.053977182	,9.236647727
+]
+                    
+                },
+                {
+                    "urobilinogenvalue":"0.1",
+                    "L,a,bvalues": [69.213771, 27.45242332, 27.089192]
+                    
+                },
+                {
+                    "urobilinogenvalue":"1",
+                    "L,a,bvalues": [59.74286667,	2.499991667,	17.90104167
+
+]
+                    
+                },
+                {
+                    "urobilinogenvalue":"4",
+                    "L,a,bvalues": [47.47006,	5.500025,	19.1638125
+
+]
+                    
+                },
+                {
+                    "urobilinogenvalue":"8",
+                    "L,a,bvalues": [43.6745,	7.47655,	12.8201
+]
+                    
+                },
+                {
+                    "urobilinogenvalue":"12",
+                    "L,a,bvalues": [42.65286667,	8.593541667,	20.73926667
+]
+                    
+                }
+               
+                
+            ]
+        },
+         {
+            "serialNo" : 4,
+            "parametername" : "ketones",
+            "testType" : "Antigen",
+            "rotation" : 0,
+            "resultWindowCoor" : "11,785 , 61,835",
+            "cropMarginHorizontal" : 10,
+            "cropMarginVertical" : 10,
+            "readTime" : 60,
+            "expireReadTime" : 65,
+            "signalChannel" : "r,g,b",
+            "L,a,bvalues" : "68.299515 7.3921204 34.97371",
+            "numberofpossibilities" : 5,
+            "patchdetails" : [
+                {
+                    "ketonesvalues":"-",
+                    "L,a,bvalues": [66.3881614,	-7.081534,	12.42698864
+]
+                    
+                },
+                {
+                    "ketonesvalues":"5",
+                    "L,a,bvalues": [55.38603333,	-3.505141667,	6.79685
+
+]
+                    
+                },
+                {
+                    "ketonesvalues":"10",
+                    "L,a,bvalues": [41.24085,	20.005625,	3.8746875
+
+]
+                    
+                },
+                {
+                    "ketonesvalues":"50",
+                    "L,a,bvalues": [32.644,	10.2105,	8.50775
+]
+                    
+                },
+                {
+                    "ketonesvalues":"100",
+                    "L,a,bvalues": [30.332,	15.52575,	7.010375
+
+]
+                    
+                }
+                
+            ]
+        },
+         {
+            "serialNo" : 5,
+            "parametername" : "protein",
+            "testType" : "Antigen",
+            "rotation" : 0,
+            "resultWindowCoor" : "11,360 , 61,410",
+            "cropMarginHorizontal" : 10,
+            "cropMarginVertical" : 10,
+            "readTime" : 60,
+            "expireReadTime" : 65,
+            "signalChannel" : "r,g,b",
+            "L,a,bvalues" : "68.299515 7.3921204 34.97371",
+            "numberofpossibilities" : 6,
+            "patchdetails" : [
+                {
+                    "proteinvalue":"-",
+                    "L,a,bvalues": [64.5061701,	-8.265625,	31.22727273
+]
+                    
+                },
+                {
+                    "proteinvalue":"10",
+                    "L,a,bvalues": [60.69925488,	-12.5859375,	29.6875
+]
+                    
+                },
+                {
+                    "proteinvalue":"30",
+                    "L,a,bvalues": [48.8705,	-15.23,	25.8475
+
+]
+                    
+                },
+                {
+                    "proteinvalue":"100",
+                    "L,a,bvalues": [38.9,	-14.8,	5.85
+
+]
+                    
+                },
+                {
+                    "proteinvalue":"300",
+                    "L,a,bvalues": [37.35348,	-18.538625,	8.7030875
+
+]
+                    
+                },
+                {
+                    "proteinvalue":"1000",
+                    "L,a,bvalues": [43.056525,	-19.33745,	7.301375
+]
+                    
+                }
+                
+            ]
+        },
+         {
+            "serialNo" : 6,
+            "parametername" : "nitrites",
+            "testType" : "Antigen",
+            "rotation" : 0,
+            "resultWindowCoor" : "11,130 , 61,180 ",
+            "cropMarginHorizontal" : 10,
+            "cropMarginVertical" : 10,
+            "readTime" : 60,
+            "expireReadTime" : 65,
+            "signalChannel" : "r,g,b",
+            "L,a,bvalues" : "68.299515 7.3921204 34.97371",
+            "numberofpossibilities" : 3,
+            "patchdetails" : [
+                {
+                    "nitritesvalue":"-",
+                    "L,a,bvalues": [72.0579945,	-7.06875,	16.95879773
+]
+                   
+                },
+                {
+                    "nitritesvalue":"Low Positive",
+                    "L,a,bvalues": [75.75,	-3.359335,	10.015625
+
+]
+                    
+                },
+                {
+                    "nitritesvalue":"High Positive",
+                    "L,a,bvalues": [54.294895,	18.359375,	1.546875
+
+]
+                    
+                }
+               
+                
+            ]
+        },
+        {
+            "serialNo" : 7,
+            "parametername" : "glucose",
+            "testType" : "Antigen",
+            "rotation" : 0,
+            "resultWindowCoor" : "11,990 ,61,1040",
+            "cropMarginHorizontal" : 10,
+            "cropMarginVertical" : 10,
+            "readTime" : 60,
+            "expireReadTime" : 65,
+            "signalChannel" : "r,g,b",
+            "L,a,bvalues" : "68.299515 7.3921204 34.97371",
+            "unit": "mg/dL",
+            "numberofpossibilities" : 6,
+            "patchdetails" : [
+                {
+                    "glucosevalue":"-",
+                    "L,a,bvalues": [46.94713237	,-13.52159091,	0.965909091
+]
+                },
+                {
+                    "glucosevalue":"100",
+                    "L,a,bvalues": [48.64326737,	-16.6775625,	23.46475
+]
+
+                },
+                {
+                    "glucosevalue":"250",
+                    "L,a,bvalues": [46.0231,	-13.84763333,	25.864325
+
+]
+                },
+                {
+                    "glucosevalue":"500",
+                    "L,a,bvalues": [38.1238,	-7.55840625,	25.76946875
+
+]
+                },
+                {
+                    "glucosevalue":"1000",
+                    "L,a,bvalues": [24.338,	5.442683333,	16.7447
+
+]
+                },
+                {
+                    "glucosevalue":"2000",
+                    "L,a,bvalues": [28.71033333	,12.1415,	18.20538333
+
+]
+                    
+                }
+                
+            ]
+        },
+         {
+            "serialNo" : 8,
+            "parametername" : "pH",
+            "testType" : "Antigen",
+            "rotation" : 0,
+            "resultWindowCoor" : "11,470 , 61,520",
+            "cropMarginHorizontal" : 10,
+            "cropMarginVertical" : 10,
+            "readTime" : 60,
+            "expireReadTime" : 65,
+            "signalChannel" : "r,g,b",
+            "L,a,bvalues" : "68.299515 7.3921204 34.97371",
+            "numberofpossibilities" : 7,
+            "patchdetails" : [
+                {
+                    "pHvalue":"5",
+                    "L,a,bvalues": [67.51087536	,0.016468182,	31.40085227
+
+]
+                   
+                },
+                {
+                    "pHvalue":"6",
+                    "L,a,bvalues": [65.16908268,	3.546833333,	37.50519167
+
+]
+                    
+                },
+                {
+                    "pHvalue":"6.5",
+                    "L,a,bvalues": [57.6839,	-4.164025,	35.5855
+
+]
+                    
+                },
+                {
+                    "pHvalue":"7",
+                    "L,a,bvalues": [45.41931152	,-17.58203125,30.1796875
+]
+                    
+                },
+                {
+                    "pHvalue":"7.5",
+                    "L,a,bvalues": [35.565175,	-23.8281125,	22.8509375
+
+
+]
+                    
+                },
+                {
+                    "pHvalue":"8",
+                    "L,a,bvalues": [34.1,	-21.0310925,	7.31612375
+
+]
+                    
+
+                },
+                {
+                    "pHvalue":"9",
+                    "L,a,bvalues": [27.5380475,	-8.09374375,	-11.753825
+
+]
+                    
+
+                }
+                
+            ]
+        },
+       
+        
+       
+        {
+            "serialNo" : 9,
+            "parametername" : "specificgravity",
+            "testType" : "Antigen",
+            "rotation" : 0,
+            "resultWindowCoor" : "11,680 , 61,730",
+            "cropMarginHorizontal" : 10,
+            "cropMarginVertical" : 10,
+            "readTime" : 60,
+            "expireReadTime" : 65,
+            "signalChannel" : "r,g,b",
+            "L,a,bvalues" : "68.299515 7.3921204 34.97371",
+            "numberofpossibilities" : 7,
+            "patchdetails" : [
+                {
+                    "specificgravityvalue":"1.000",
+                    "L,a,bvalues": [70.74085582,	-7.994318182,	39.66647727
+
+
+]
+                    
+                },
+                {
+                    "specificgravityvalue":"1.005",
+                    "L,a,bvalues": [58.4444,	-10.71351667,	40.63516667
+
+]
+                    
+                },
+                {
+                    "specificgravityvalue":"1.010",
+                    "L,a,bvalues": [61.4182125,	-0.9140625,	42.3315625
+
+]
+                    
+                },
+                {
+                    "specificgravityvalue":"1.015",
+                    "L,a,bvalues": [66.15793333,	-1.203,	32.13226667
+
+]
+                    
+                },
+                {
+                    "specificgravityvalue":"1.020",
+                    "L,a,bvalues": [71.365,	-7.069875,	28.71065
+
+]
+                    
+                },
+                {
+                    "specificgravityvalue":"1.025",
+                    "L,a,bvalues": [65.511246,	-4.665575,	43.06244
+
+]
+                   
+
+                },
+                {
+                    "specificgravityvalue":"1.030",
+                    "L,a,bvalues": [58.62782583,	-4.420645833,	40.2210625
+
+]
+                    
+
+                }
+                
+            ]
+        },
+        
+       
+      
+       
+        {
+            "serialNo" : 10,
+            "parametername" : "leukocytes",
+            "testType" : "Antigen",
+            "rotation" : 0,
+            "resultWindowCoor" : "11,20 , 61,70 ",
+            "cropMarginHorizontal" : 10,
+            "cropMarginVertical" : 10,
+            "readTime" : 60,
+            "expireReadTime" : 65,
+            "signalChannel" : "r,g,b",
+            "L,a,bvalues" : "68.299515 7.3921204 34.97371",
+            "numberofpossibilities" : 4,
+            "patchdetails" : [
+                {
+                    "leukocytesvalue":"-",
+                    "L,a,bvalues": [76.5193315,	-4.794318182,	13.85738636
+]
+                    
+                },
+                {
+                    "leukocytesvalue":"25",
+                    "L,a,bvalues": [83.03623814,	-4.635416667,	20.52083333
+
+]
+                    
+                },
+                {
+                    "leukocytesvalue":"75",
+                    "L,a,bvalues": [76.9988	,-3.0076875,	12.0528125
+
+]
+                    
+                },
+               
+                {
+                    "leukocytesvalue":"500",
+                    "L,a,bvalues": [71.588,	1.078,	5.5468
+
+]
+                    
+
+                }
+                
+            ]
+        }
+        
+                
+            
+        
+    ]
+}
