@@ -6,22 +6,27 @@ import websockets
 import threading
 import queue
 import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation
+
+from logging_config import setup_logging
+
+_SEND_ASYNC = None
+DEBUGGING = False
+if DEBUGGING:
+    import matplotlib.pyplot as plt
+    from matplotlib.animation import FuncAnimation
+    
 from collections import deque
 import time
 from typing import List, Iterable, Tuple
 import re
-from datetime import datetime
-import sys
 from pathlib import Path
 import json
 import os
 
 from tidal import TV_calculations
+import logging
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # add parent dir
-from spiro_encoder import prepare_spiro_data
+logger = logging.getLogger(__name__)
 
 #  CONFIG 
 # Sampling period (seconds). 0.005 = 200 Hz
@@ -52,10 +57,6 @@ stop_event = threading.Event()
 
 frame_queue = queue.Queue()
 
-_SEND_ASYNC = None
-_encoder_task = None
-DEBUGGING = False
-
 def set_sender(send_async_fn):
     """
     send_async_fn must be an async function: await send_async_fn("msgType~payload")
@@ -64,45 +65,23 @@ def set_sender(send_async_fn):
     _SEND_ASYNC = send_async_fn
 
 async def clearGlobalReferences():
-    global _encoder_task
-    if _encoder_task is not None:
-        _encoder_task.cancel()
-        try:
-            await _encoder_task
-        except asyncio.CancelledError:
-            pass
-        _encoder_task = None
-    all_samples_pa.clear()
+    global _fir_buf, _mean_buf, _mean_ready, _mean_value, _sample_counter, all_samples_pa
     
-    global _fir_buf, _mean_buf, _mean_ready, _mean_value, _sample_counter
     _fir_buf.clear()
     _mean_buf.clear()
     _mean_ready = False
     _mean_value = 0.0
     _sample_counter = 0
+    all_samples_pa.clear()
 
 async def RelealTimeAnalysis(message):
-    global _encoder_task
-    if _encoder_task is None:
-        #_encoder_task = asyncio.create_task(encoder_loop())        
-        all_samples_pa.clear()
-        #print("[encoder] encoder_loop started")
-
-    await processData(message)
-
-async def processData(message):
-        if message:        
+        if message:     
+            with open(LOG_FILE, "a", buffering=1, encoding="utf-8") as tv:
+                # log everything exactly as received
+                tv.write(message.strip() + "\n")   
+            
             data = decode_pressure_from_message(message)
-            if data and len(data) == 20:    
-                if _encoder_task is not None:
-                    frame_queue.put(data)   #for encoder_loop (20 samples frame)
-
-                # with open(LOG_FILE_FOR_TV, "a", buffering=1, encoding="utf-8") as tv:
-                #     # log everything exactly as received
-                #     tv.write(message.strip() + "\n")                
-                # for v in data:
-                #     pressure_queue.put(v)      # for plotting
-
+            if data and len(data) == 20:
                 # collect for final TV
                 all_samples_pa.extend(data)
 
@@ -119,7 +98,7 @@ async def processData(message):
                             "dataFromLib~107~" + json.dumps(payload, separators=(",", ":"))
                         )
                     except Exception as e:
-                        print("[encoder] ERROR sending x/y:", e)
+                        logger.info("[encoder] ERROR sending x/y:", e)
                         
 
 def triangular_weights(window: int) -> np.ndarray:
@@ -177,7 +156,7 @@ def process_frame_xy(frame, *, global_time=False):
 
 async def callCalculateTV():
     snapshot = list(all_samples_pa)
-    print("Collected samples:", len(snapshot))
+    logger.info("Collected samples:", len(snapshot))
     arr = np.asarray(snapshot, dtype=np.float64)
     await TV_calculations.calculateFinalTV(arr)
     all_samples_pa.clear()
@@ -226,7 +205,7 @@ async def encoder_loop_deprecated():
         except queue.Empty:
             await asyncio.sleep(0.05)
         except Exception as e:
-            print("[encoder] ERROR:", e)
+            logger.info("[encoder] ERROR:", e)
             await asyncio.sleep(0.05)
 
   
@@ -286,12 +265,12 @@ def decode_pressure_from_message(message):
 async def ws_listener():
     try:
         async with websockets.connect(uri) as websocket:
-            print("WebSocket connection established.")
+            logger.info("WebSocket connection established.")
             await websocket.send("BleAppletInit")
-            print("Sent: BleAppletInit")
+            logger.info("Sent: BleAppletInit")
             await asyncio.sleep(1)
             await websocket.send("startScanFromHtml~60")
-            print("Sent: startScanFromHtml~60")
+            logger.info("Sent: startScanFromHtml~60")
             
             # TRACK TOTAL SAMPLES FOR RELATIVE TIME
             total_sample_count = 0 
@@ -317,22 +296,25 @@ async def ws_listener():
                                 # CALCULATE RELATIVE TIME (0.005, 0.010, etc.)
                                 rel_time = total_sample_count * DT
                                 
-                                # PRINT TO TERMINAL
-                                print(f"[Time: {rel_time:.3f}s] {val:8.2f} Pa")
+                                # logger.info TO TERMINAL
+                                logger.info(f"[Time: {rel_time:.3f}s] {val:8.2f} Pa")
 
                                 # Send to plot
                                 pressure_queue.put(val)
 
     except (websockets.exceptions.ConnectionClosedError, ConnectionRefusedError) as e:
-        print(f"WebSocket connection failed: {e}")
+        logger.info(f"WebSocket connection failed: {e}")
     except Exception as e:
-        print(f"An error occurred in the WebSocket listener: {e}")
+        logger.info(f"An error occurred in the WebSocket listener: {e}")
 
 def start_ws_thread():
     asyncio.run(ws_listener())
 
 if DEBUGGING:
     # Start websocket listener in background thread
+    setup_logging()
+    logger = logging.getLogger(__name__)
+    
     ws_thread = threading.Thread(target=start_ws_thread, daemon=True) # Renamed to ws_thread
     ws_thread.start()
 
@@ -403,7 +385,7 @@ def update(_):
         
         if start_data_time is None:
             start_data_time = now
-            print(f"[Realtime] Data flow started. Timer set for {TEST_DURATION} seconds.")
+            logger.info(f"[Realtime] Data flow started. Timer set for {TEST_DURATION} seconds.")
 
     if not pressures_pa:
         return line,
@@ -436,7 +418,7 @@ def update(_):
 
     if should_close and not end_of_test_reported:
         end_of_test_reported = True
-        print(f"[Realtime] {close_reason} — closing plot and running analysis…")
+        logger.info(f"[Realtime] {close_reason} — closing plot and running analysis…")
         timer = fig.canvas.new_timer(interval=100)
         timer.add_callback(lambda: plt.close(fig))
         timer.start()
@@ -450,10 +432,10 @@ if DEBUGGING:
     plt.show()
 
     # Signal the thread to stop and wait for it
-    print("[Realtime] Plot closed. Waiting for data stream to finish...")
+    logger.info("[Realtime] Plot closed. Waiting for data stream to finish...")
     stop_event.set()
     if 'ws_thread' in globals() and ws_thread.is_alive():
-        ws_thread.join(timeout=2.0) # Wait up to 2 seconds for it to finish printing
+        ws_thread.join(timeout=2.0) # Wait up to 2 seconds for it to finish logger.infoing
 
     #run tidal calculations after realtime window closes
     try:
@@ -462,7 +444,7 @@ if DEBUGGING:
         tv_path = os.path.join(here, "TV_calculations.py")
         
         if not os.path.exists(tv_path):
-            print(f"[tidal→TV] Error: '{tv_path}' not found. Cannot run analysis.")
+            logger.info(f"[tidal→TV] Error: '{tv_path}' not found. Cannot run analysis.")
         else:
             spec = importlib.util.spec_from_file_location("TV_calculations", tv_path)
             tv = importlib.util.module_from_spec(spec)
@@ -473,13 +455,13 @@ if DEBUGGING:
             except Exception:
                 pass
 
-            print(f"[tidal→TV] Running TV_calculations on: {LOG_FILE}")
+            logger.info(f"[tidal→TV] Running TV_calculations on: {LOG_FILE}")
             if hasattr(tv, "run_one"):
                 tv.run_one(LOG_FILE)
             elif hasattr(tv, "main"):
                 tv.main()
             else:
-                print("[tidal→TV] TV_calculations: no run_one() or main() function found.")
+                logger.info("[tidal→TV] TV_calculations: no run_one() or main() function found.")
 
     except Exception as e:
-        print(f"[tidal→TV] Failed to run TV_calculations: {e}")
+        logger.info(f"[tidal→TV] Failed to run TV_calculations: {e}")

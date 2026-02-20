@@ -5,8 +5,15 @@ import websockets
 import threading
 import queue
 import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation
+
+from logging_config import setup_logging
+
+_SEND_ASYNC = None
+DEBUGGING = False
+if DEBUGGING:
+    import matplotlib.pyplot as plt
+    from matplotlib.animation import FuncAnimation
+
 from collections import deque
 from typing import List, Iterable, Tuple
 import re
@@ -15,9 +22,11 @@ from datetime import datetime
 import winsound
 import sys
 import json
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # add parent dir
-from spiro_encoder import prepare_spiro_data
 from forced import finalResultCalculator
+
+import logging
+
+logger = logging.getLogger(__name__)
 
 last_data_time = None
 end_of_test_reported = False
@@ -41,11 +50,8 @@ baseline_pressure = 0
 
 frame_queue = queue.Queue()
 
-_SEND_ASYNC = None
 _encoder_task = None
-DEBUGGING = False
 all_samples_pa = deque()
-
 
 def set_sender(send_async_fn):
     """
@@ -56,32 +62,129 @@ def set_sender(send_async_fn):
 
 
 async def clearGlobalReferences():
-    global _encoder_task
+    global _encoder_task, client_should_stop, ws_conn
+    global pressures_pa, pressure_queue, frame_queue
+    global all_samples_pa
+
+    global start_time, session_end_time, last_data_time, end_of_test_reported
+
+    global active, first_activation, start_cnt, end_cnt
+    global V_state, flow_last, vol_last, curr_v, curr_f, last_pf_len, below_cnt
+
+    global vt_active, vt_above_cnt, vt_quiet_cnt
+    global vt_V, vt_t_hist, vt_vol_hist, vt_last_pf_len
+
+    global exhale_timer_running, exhale_timer_done
+    global exhale_start_walltime, exhale_last_duration_sec
+    global exhale_start_press_count, exhale_end_hold_count
+    global beep_start_played, long_beep_played, seven_sec_beep_played
+
+    # -----------------------------
+    # Stop encoder task
+    # -----------------------------
     if _encoder_task is not None:
         _encoder_task.cancel()
         _encoder_task = None
+
+    # -----------------------------
+    # HARD RESET: queues & buffers
+    # -----------------------------
+    pressures_pa.clear()
     all_samples_pa.clear()
+
+    while not pressure_queue.empty():
+        pressure_queue.get_nowait()
+
+    while not frame_queue.empty():
+        frame_queue.get_nowait()
+
+    # -----------------------------
+    # Time/session reset
+    # -----------------------------
+    start_time = None
+    session_end_time = None
+    last_data_time = None
+    end_of_test_reported = False
+
+    client_should_stop = False
+    ws_conn = None
+
+    # -----------------------------
+    # Flow–Volume reset
+    # -----------------------------
+    active = False
+    first_activation = True
+    start_cnt = 0
+    end_cnt = 0
+    below_cnt = 0
+
+    V_state = 0.0
+    flow_last = 0.0
+    vol_last = 0.0
+
+    curr_v.clear()
+    curr_f.clear()
+    last_pf_len = 0
+
+    # -----------------------------
+    # Volume–Time reset
+    # -----------------------------
+    vt_active = False
+    vt_above_cnt = 0
+    vt_quiet_cnt = 0
+    vt_V = 0.0
+
+    vt_t_hist.clear()
+    vt_vol_hist.clear()
+    vt_last_pf_len = 0
+
+    # -----------------------------
+    # Exhale timer reset
+    # -----------------------------
+    exhale_timer_running = False
+    exhale_timer_done = False
+    exhale_start_walltime = None
+    exhale_last_duration_sec = 0.0
+    exhale_start_press_count = 0
+    exhale_end_hold_count = 0
+
+    beep_start_played = False
+    long_beep_played = False
+    seven_sec_beep_played = False
+
+    logger.info("[RESET] All realtime state cleared successfully")
+
 
 async def RelealTimeAnalysis(message):
     await processData(message)
     update(None)
 
 async def processData(message):
-    if message:
-        raw, data = decode_pressure_from_message(message)
-        if raw:
-            frame_queue.put(raw)
-        if data:
-            with open(LOG_FILE, "a", buffering=1, encoding="utf-8") as f:           
-                f.write(message.strip() + "\n")
+    if not message:
+        return
 
-            for v in data:
-                pressure_queue.put(v)
+    raw, data = decode_pressure_from_message(message)
+
+    # Nothing decoded → ignore silently
+    if not raw and not data:
+        return
+
+    if raw:
+        frame_queue.put(raw)
+
+    if data:
+        # Log original message
+        with open(LOG_FILE, "a", buffering=1, encoding="utf-8") as f:
+            f.write(message.strip() + "\n")
+
+        for v in data:
+            pressure_queue.put(v)
+
         all_samples_pa.extend(data)
 
 async def callCalculateFinalResult():
     snapshot = list(all_samples_pa)
-    print("Collected samples:", len(snapshot))
+    logger.info("Collected samples:", len(snapshot))
     arr = np.asarray(snapshot, dtype=np.float64)
     await finalResultCalculator.calculateFinalResult(arr)
     all_samples_pa.clear()
@@ -105,26 +208,25 @@ def load_coeffs(filename):
     file_path = resource_path(os.path.join("models", filename))
 
     if not os.path.exists(file_path):
-        print(f"\nCRITICAL ERROR: Could not find '{filename}' in 'models' folder.")
-        print(f"Path searched: {file_path}")
+        logger.info(f"\nCRITICAL ERROR: Could not find '{filename}' in 'models' folder.")
+        logger.info(f"Path searched: {file_path}")
         sys.exit(1)
 
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
-        print(f"[Realtime] Loaded {filename}")
+        logger.info(f"[Realtime] Loaded {filename}")
         return np.array(data["coeffs"], dtype=float)
 
     except Exception as e:
-        print(f"Error reading JSON {filename}: {e}")
+        logger.info(f"Error reading JSON {filename}: {e}")
         sys.exit(1)
 
-if DEBUGGING:
-    #  REPLACED HARDCODED VALUES WITH LOADER 
-    print(" Loading Coefficients ")
-    pull_coefficients = load_coeffs("coeffs_pull.json")
-    push_coefficients = load_coeffs("coeffs_push.json")
+#  REPLACED HARDCODED VALUES WITH LOADER 
+logger.info(" Loading Coefficients ")
+pull_coefficients = load_coeffs("coeffs_pull.json")
+push_coefficients = load_coeffs("coeffs_push.json")
 
 #  NEW: knobs 
 USE_DEADBAND = True
@@ -217,17 +319,18 @@ def is_special_frame_bytes(b):
 import re
 
 def decode_pressure_from_message(message):
+    EMPTY = ([], [])
     m = re.search(r'\[([0-9A-Fa-f:]+)\]', message)
     if not m:
-        return []
+        return EMPTY
 
     try:
         b = [int(t, 16) & 0xFF for t in m.group(1).split(':')]
     except ValueError:
-        return []
+        return EMPTY
 
     if len(b) <= 119 or b[0] != 83 or b[1] != 72 or b[119] != 70:
-        return []
+        return EMPTY
 
     if not hasattr(decode_pressure_from_message, "_frame_a_skip_count"):
         decode_pressure_from_message._frame_a_skip_count = 0
@@ -236,13 +339,13 @@ def decode_pressure_from_message(message):
 
     if grabage_frame and decode_pressure_from_message._frame_a_skip_count < 5:
         decode_pressure_from_message._frame_a_skip_count += 1
-        print(f"DEBUG: Ignored Frame #{decode_pressure_from_message._frame_a_skip_count}")
-        return []
+        logger.info(f"DEBUG: Ignored Frame #{decode_pressure_from_message._frame_a_skip_count}")
+        return EMPTY
 
     count = decode_pressure_from_message._frame_a_skip_count
     if count <= 5:
         if all(v == 0 for v in b[7:14]):
-            return []
+            return EMPTY
         
     OS_dig = 2**23
     FSS_inH2O = 120.0
@@ -279,12 +382,12 @@ async def ws_listener():
     try:
         async with websockets.connect(uri) as websocket:
             ws_conn = websocket
-            print("WebSocket connection established.")
+            logger.info("WebSocket connection established.")
             await websocket.send("BleAppletInit")
-            print("Sent: BleAppletInit")
+            logger.info("Sent: BleAppletInit")
             await asyncio.sleep(1)
             await websocket.send("startScanFromHtml~60")
-            print("Sent: startScanFromHtml~60")
+            logger.info("Sent: startScanFromHtml~60")
 
             with open(LOG_FILE, "a", buffering=1, encoding="utf-8") as f:
                 async for message in websocket:
@@ -293,7 +396,7 @@ async def ws_listener():
                             await websocket.send("stopScanFromHtml")
                         except Exception:
                             pass
-                        print("[ws_listener] client requested stop — closing ws.")
+                        logger.info("[ws_listener] client requested stop — closing ws.")
                         break
 
                     f.write(message.strip() + "\n")
@@ -308,22 +411,24 @@ async def ws_listener():
                                 pressure_queue.put(v)
 
     except (websockets.exceptions.ConnectionClosedError, ConnectionRefusedError) as e:
-        print(f"WebSocket connection failed: {e}")
+        logger.info(f"WebSocket connection failed: {e}")
     except Exception as e:
-        print(f"An error occurred in the WebSocket listener: {e}")
+        logger.info(f"An error occurred in the WebSocket listener: {e}")
     finally:
         ws_conn = None
 
 LOG_FILE = Path("realtime_all") / "forced_trial.log"
 LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
 
-print("Time(s) | Pressure(Pa) | FV_Flow(L/s) | FV_Vol(L) | VT_Vol(L)")
+logger.info("Time(s) | Pressure(Pa) | FV_Flow(L/s) | FV_Vol(L) | VT_Vol(L)")
 
 def start_ws_thread():
     asyncio.run(ws_listener())
 
 # Start websocket listener in background thread
 if DEBUGGING:
+    setup_logging()
+    logger = logging.getLogger(__name__)
     thread = threading.Thread(target=start_ws_thread, daemon=True)
     thread.start()
 
@@ -382,64 +487,65 @@ def integrate_flow_to_volume(flow: np.ndarray, dt: float) -> np.ndarray:
 
 W_TRI = triangular_weights(TRI_WINDOW)
 
-# Setup plots
-#FIGURE + AXES LAYOUT 
-fig = plt.figure(figsize=(11.8, 5.6))
+if DEBUGGING:
+    # Setup plots
+    #FIGURE + AXES LAYOUT 
+    fig = plt.figure(figsize=(11.8, 5.6))
 
-# 4 columns: 3 plots + 1 narrow timer panel
-gs = fig.add_gridspec(1, 4, width_ratios=[3, 3, 3, 1], wspace=0.35)
+    # 4 columns: 3 plots + 1 narrow timer panel
+    gs = fig.add_gridspec(1, 4, width_ratios=[3, 3, 3, 1], wspace=0.35)
 
-ax_p   = fig.add_subplot(gs[0, 0])  # Pressure–Time
-ax_fv  = fig.add_subplot(gs[0, 1])  # Volume–Flow
-ax_vt  = fig.add_subplot(gs[0, 2])  # Volume–Time
-ax_tim = fig.add_subplot(gs[0, 3])  # Timer panel
+    ax_p   = fig.add_subplot(gs[0, 0])  # Pressure–Time
+    ax_fv  = fig.add_subplot(gs[0, 1])  # Volume–Flow
+    ax_vt  = fig.add_subplot(gs[0, 2])  # Volume–Time
+    ax_tim = fig.add_subplot(gs[0, 3])  # Timer panel
 
-# Timer panel styling (no ticks, just a box)
-ax_tim.set_xticks([])
-ax_tim.set_yticks([])
-ax_tim.set_facecolor("#FCFCFC")
-for spine in ax_tim.spines.values():
-    spine.set_visible(True)
+    # Timer panel styling (no ticks, just a box)
+    ax_tim.set_xticks([])
+    ax_tim.set_yticks([])
+    ax_tim.set_facecolor("#FCFCFC")
+    for spine in ax_tim.spines.values():
+        spine.set_visible(True)
 
-ax_tim.set_title("Timer", fontsize=11)
+    ax_tim.set_title("Timer", fontsize=11)
 
-timer_text = ax_tim.text(
-    0.5, 0.5, "0 s",
-    ha="center",
-    va="center",
-    fontsize=16,
-    bbox=dict(boxstyle="round,pad=0.6", facecolor="#f5f5f5", edgecolor="black")
-)
+    timer_text = ax_tim.text(
+        0.5, 0.5, "0 s",
+        ha="center",
+        va="center",
+        fontsize=16,
+        bbox=dict(boxstyle="round,pad=0.6", facecolor="#f5f5f5", edgecolor="black")
+    )
 
-line_p,  = ax_p.plot([], [], lw=1)
-line_fv, = ax_fv.plot([], [], lw=1.1, linestyle='-')  # add marker
-line_vt, = ax_vt.plot([], [], lw=1.1, color='tab:orange')  # placeholder for VT plot
-prev_active = False  # NEW: to detect transitions
+    line_p,  = ax_p.plot([], [], lw=1)
+    line_fv, = ax_fv.plot([], [], lw=1.1, linestyle='-')  # add marker
+    line_vt, = ax_vt.plot([], [], lw=1.1, color='tab:orange')  # placeholder for VT plot
+    prev_active = False  # NEW: to detect transitions
 
 
-# Left axes config (set limits *here*, as requested)
-ax_p.set_xlabel("Time (s)")
-ax_p.set_ylabel("Pressure (Pa)")
-ax_p.set_title("Real-time Pressure (Pa)")
-ax_p.grid(True, alpha=0.3)
-ax_p.set_xlim(0, 20)
-ax_p.set_ylim(-5000, 5000)
+    # Left axes config (set limits *here*, as requested)
+    ax_p.set_xlabel("Time (s)")
+    ax_p.set_ylabel("Pressure (Pa)")
+    ax_p.set_title("Real-time Pressure (Pa)")
+    ax_p.grid(True, alpha=0.3)
+    ax_p.set_xlim(0, 20)
+    ax_p.set_ylim(-5000, 5000)
 
-# Right axes config (Volume–Flow loop) — limits set directly here
-ax_fv.set_xlabel("Volume (L)")
-ax_fv.set_ylabel("Flow (L/s)")
-ax_fv.set_title("Real-time Volume–Flow Loop")
-ax_fv.grid(True, alpha=0.3)
-ax_fv.set_xlim(-6, 6.0)
-ax_fv.set_ylim(-12.0, 12.0)
+    # Right axes config (Volume–Flow loop) — limits set directly here
+    ax_fv.set_xlabel("Volume (L)")
+    ax_fv.set_ylabel("Flow (L/s)")
+    ax_fv.set_title("Real-time Volume–Flow Loop")
+    ax_fv.grid(True, alpha=0.3)
+    ax_fv.set_xlim(-6, 6.0)
+    ax_fv.set_ylim(-12.0, 12.0)
 
-# VT plot config (placeholder)
-ax_vt.set_xlabel("Time (s)")
-ax_vt.set_ylabel("Volume (L)")
-ax_vt.set_title("Real-time Volume–Time")
-ax_vt.grid(True, alpha=0.3)
-ax_vt.set_xlim(0, 20)
-ax_vt.set_ylim(-6, 6.0)
+    # VT plot config (placeholder)
+    ax_vt.set_xlabel("Time (s)")
+    ax_vt.set_ylabel("Volume (L)")
+    ax_vt.set_title("Real-time Volume–Time")
+    ax_vt.grid(True, alpha=0.3)
+    ax_vt.set_xlim(0, 20)
+    ax_vt.set_ylim(-6, 6.0)
 
 start_time = None      # will be set when the first sample arrives
 MAX_RUNTIME = 20      # seconds to auto-stop the realtime plot
@@ -463,9 +569,9 @@ def update(_):
     if start_time is None and got_new:
         start_time = time.time()
         session_end_time = start_time + SESSION_MAX_SEC
-        print(f"[Realtime] Session started. Will stop accepting data at {session_end_time} (epoch).")
+        logger.info(f"[Realtime] Session started. Will stop accepting data at {session_end_time} (epoch).")
 
-    if not pressures_pa:
+    if not pressures_pa and DEBUGGING:
         return line_p, line_fv
 
     # raw rolling data and time
@@ -475,7 +581,7 @@ def update(_):
     # baseline and FIR
     y0, _ = remove_initial_mean(y_raw, INIT_MEAN_N)
     pf = streaming_fir(y0, W_TRI)
-    if pf.size == 0:
+    if pf.size == 0 and DEBUGGING:
         return line_p, line_fv
 
     # align time to filtered length
@@ -497,7 +603,7 @@ def update(_):
 
     if (not got_new) and last_data_time and (now - last_data_time) > 1.0 and not end_of_test_reported:
         end_of_test_reported = True
-        print("[Realtime] No new data — closing plot and running analysis…")
+        logger.info("[Realtime] No new data — closing plot and running analysis…")
         if DEBUGGING:
             try:
                 if 'ani' in globals() and hasattr(ani, 'event_source'):
@@ -541,17 +647,26 @@ def update(_):
         f_now = flow_all[i]
 
         #  Exhale timer logic (pressure-based) 
-        if not exhale_timer_running and not exhale_timer_done:
+        if not exhale_timer_running:
             if p_now >= EXHALE_START_Pressure:
                 exhale_start_press_count += 1
                 if exhale_start_press_count >= EXHALE_START_HOLD_SAMPLES:
+                    # RESET OLD TIMER ONLY NOW
                     exhale_timer_running     = True
+                    exhale_timer_done        = False  # Clear the "Halted" state
+                    exhale_start_walltime    = time.time()
+                    exhale_last_duration_sec = 0.0
+                    exhale_end_hold_count    = 0
                     
-                    #NEW: PRINT TIMER START
-                    print(f"\n[EVENT] Timer STARTED (Sustained Pressure > {EXHALE_START_Pressure})")
-
+                    # Reset audio flags
+                    beep_start_played   = False
+                    long_beep_played    = False
+                    seven_sec_beep_played = False
+                    
+                    logger.info(f"\n[EVENT] Timer STARTED (New Exhale > {EXHALE_START_Pressure})")
+                    
                     # Send flag to client
-                    if _SEND_ASYNC is not None:
+                    if _SEND_ASYNC is not None and (not DEBUGGING):
                         event_data = {
                             "event": "timer_started",
                             "pressure_threshold": EXHALE_START_Pressure,
@@ -564,21 +679,14 @@ def update(_):
                             loop.create_task(_SEND_ASYNC(f"dataFromLib~108~event~{payload}"))
                         except:
                             pass  # silently fail if no event loop
-                    
-                    exhale_start_walltime    = time.time()
-                    exhale_last_duration_sec = 0.0
-                    exhale_end_hold_count    = 0
-                    beep_start_played   = False
-                    long_beep_played    = False
-                    seven_sec_beep_played = False
-                    
+
                     if not beep_start_played:
                         threading.Thread(target=play_start_beep, daemon=True).start()
                         beep_start_played = True
-                        # NEW: PRINT FIRST BEEP
-                        print("[EVENT]First Beep Triggered (Start)")
+                        logger.info("[EVENT]First Beep Triggered (Start)")
+                        
                         # Send beep event to client
-                        if _SEND_ASYNC is not None:
+                        if _SEND_ASYNC is not None and (not DEBUGGING):
                             event_data = {
                                 "event": "beep_start",
                                 "type": "first_beep",
@@ -592,6 +700,8 @@ def update(_):
                                 loop.create_task(_SEND_ASYNC(f"dataFromLib~108~event~{payload}"))
                             except:
                                 pass  # silently fail if no event loop
+            else:
+                exhale_start_press_count = 0                                        
 
         elif exhale_timer_running:
             now     = time.time()
@@ -605,11 +715,11 @@ def update(_):
                         exhale_timer_done        = True
                         exhale_last_duration_sec = elapsed
                         
-                        # NEW: PRINT TIMER STOP
-                        print(f"[EVENT] Timer STOPPED (Duration: {elapsed:.2f}s)")
+                        # NEW: logger.info TIMER STOP
+                        logger.info(f"[EVENT] Timer STOPPED (Duration: {elapsed:.2f}s)")
 
                         # Send timer stop event to client
-                        if _SEND_ASYNC is not None:
+                        if _SEND_ASYNC is not None and (not DEBUGGING):
                             event_data = {
                                 "event": "timer_stopped",
                                 "duration_sec": round(elapsed, 2),
@@ -652,6 +762,40 @@ def update(_):
                 if start_cnt >= START_HOLD:
                     active = True
                     start_cnt = 0
+                    
+                    # --- CHANGED: HALT THE TIMER (Don't Reset) ---
+                    if exhale_timer_running:
+                        # 1. Calculate final time
+                        final_time = time.time() - exhale_start_walltime if exhale_start_walltime else 0.0
+                        exhale_last_duration_sec = final_time
+                        
+                        # 2. Change state to "Done" (Halted)
+                        exhale_timer_running = False
+                        exhale_timer_done = True
+                        
+                        # 3. logger.info THE RESULT
+                        logger.info(f"\n{'='*40}")
+                        logger.info(f"[EVENT] Timer HALTED")
+                        logger.info(f"Final Exhale Time: {final_time:.2f}s")
+                        logger.info(f"{'='*40}\n")
+                        sys.stdout.flush()
+                        
+                        # Send halted timer event to client
+                        if _SEND_ASYNC is not None and (not DEBUGGING):
+                            event_data = {
+                                "event": "Timer HALTED",
+                                "type": "Final Exhale Time",
+                                "Exhale Time": f"{final_time:.2f}s",
+                                "timestamp": time.time()
+                            }
+                            payload = json.dumps(event_data, separators=(',', ':'))
+                            
+                            try:
+                                loop = asyncio.get_event_loop()
+                                loop.create_task(_SEND_ASYNC(f"dataFromLib~108~event~{payload}"))
+                            except:
+                                pass  # silently fail if no event loop
+
                     if first_activation:
                         V_state = 0.0
                         curr_v.append(0.0)
@@ -688,10 +832,11 @@ def update(_):
 
     last_pf_len = pf.size
 
-    if curr_v:
-        line_fv.set_data(np.asarray(curr_v), np.asarray(curr_f))
-    else:
-        line_fv.set_data([], [])
+    if DEBUGGING:
+        if curr_v:
+            line_fv.set_data(np.asarray(curr_v), np.asarray(curr_f))
+        else:
+            line_fv.set_data([], [])
 
     #CUMULATIVE VOLUME–TIME PLOT UPDATE + CSV WRITING
     global vt_active, vt_above_cnt, vt_quiet_cnt, vt_V, vt_t_hist, vt_vol_hist, vt_last_pf_len
@@ -757,13 +902,13 @@ def update(_):
 
     vt_last_pf_len = pf.size
     
-    # Print to 
+    # logger.info to 
     if DEBUGGING:
         if csv_rows:
             for row in csv_rows:
                 # row is a list: [Time, Pressure, FV_Flow, FV_Volume, VT_Volume]
                 # We join them with commas or pipes for readability
-                print(f"{row[0]}, {row[1]}, {row[2]}, {row[3]}, {row[4]}")
+                logger.info(f"{row[0]}, {row[1]}, {row[2]}, {row[3]}, {row[4]}")
     
     if csv_rows and (not DEBUGGING) and _SEND_ASYNC is not None:
         loop = asyncio.get_running_loop()
@@ -784,34 +929,46 @@ def update(_):
         vt = np.array([float(r[4]) for r in csv_rows], dtype=float)
 
         # Time-Pressure (many points in one payload)
+        if p is not None and _SEND_ASYNC is not None:
+            payload = {
+                "x": t.tolist(),
+                "y": p.tolist()
+            }
 
-        u24 = to_u24_from_signal(p, scale=500)
-        
-        loop.create_task(_SEND_ASYNC("dataFromLib~108~spiroForcedTimePressure~" + json.dumps(u24)))
+            try:
+                loop.create_task(_SEND_ASYNC(
+                "dataFromLib~108~spiroForcedTimePressure~" + json.dumps(payload, separators=(",", ":")))
+                )
+            except Exception as e:
+                logger.info("[encoder] ERROR sending x/y:", e)
 
         # Volume-Flow (many points in one payload) - only if you have active points
-        if f_fv.size:
-            flow_u24 = to_u24_from_signal(
-                f_fv,
-                scale=500   # good starting value
-            )
+        if f_fv.size and _SEND_ASYNC is not None:
+            payload = {
+                "x": v_fv.tolist(),
+                "y": f_fv.tolist()
+            }
 
-            loop.create_task(_SEND_ASYNC(
-                "dataFromLib~108~spiroForcedVolumnFlow~" +
-                json.dumps(flow_u24)
-            ))
-
+            try:
+                loop.create_task(_SEND_ASYNC(
+                "dataFromLib~108~spiroForcedVolumeFlow~" + json.dumps(payload, separators=(",", ":")))
+                )
+            except Exception as e:
+                logger.info("[encoder] ERROR sending x/y:", e)
+       
         # Time-Volume (many points in one payload)
-        volume_u24 = to_u24_from_signal(
-            vt,
-            scale=500
-        )
+        if vt.size and _SEND_ASYNC is not None:
+            payload = {
+                "x": t.tolist(),
+                "y": vt.tolist()
+            }
 
-        loop.create_task(_SEND_ASYNC(
-            "dataFromLib~108~spiroForcedTimeVolumn~" +
-            json.dumps(volume_u24)
-        ))
-
+            try:
+                loop.create_task(_SEND_ASYNC(
+                "dataFromLib~108~spiroForcedTimeVolume~" + json.dumps(payload, separators=(",", ":")))
+                )
+            except Exception as e:
+                logger.info("[encoder] ERROR sending x/y:", e)
 
 
     if DEBUGGING:
@@ -829,7 +986,7 @@ def update(_):
             now = time.time()
             if now >= session_end_time:
                 end_of_test_reported = True
-                print(f"[Realtime] Session time reached {SESSION_MAX_SEC}s — stopping data collection and closing plot.")
+                logger.info(f"[Realtime] Session time reached {SESSION_MAX_SEC}s — stopping data collection and closing plot.")
                 client_should_stop = True
                 try:                    
                     if 'ani' in globals() and hasattr(ani, 'event_source'):
@@ -848,17 +1005,18 @@ def update(_):
     if exhale_timer_running and exhale_start_walltime is not None:
         elapsed_exhale = time.time() - exhale_start_walltime
         exhale_last_duration_sec = elapsed_exhale
-        timer_text.set_text(f"{int(elapsed_exhale)} s")
+        if DEBUGGING:
+            timer_text.set_text(f"{int(elapsed_exhale)} s")
         
         # 7-second beep
         if elapsed_exhale >= 7.0 and not seven_sec_beep_played:
             seven_sec_beep_played = True
             threading.Thread(target=play_long_beep, daemon=True).start()
-            #  NEW: PRINT 7s BEEP 
-            print("[EVENT]Second Beep Triggered (7s Mark)")
+            #  NEW: logger.info 7s BEEP 
+            logger.info("[EVENT]Second Beep Triggered (7s Mark)")
 
             # Send 7s beep event to client
-            if _SEND_ASYNC is not None:
+            if _SEND_ASYNC is not None and (not DEBUGGING):
                 event_data = {
                     "event": "beep_7s",
                     "type": "warning_beep", 
@@ -875,16 +1033,17 @@ def update(_):
                     pass  # silently fail if no event loop
 
     elif exhale_timer_done:
-        timer_text.set_text(f"{int(exhale_last_duration_sec)} s")
+        if DEBUGGING:
+            timer_text.set_text(f"{int(exhale_last_duration_sec)} s")
         
         # Final beep (End of maneuver)
         if not long_beep_played:
             threading.Thread(target=play_long_beep, daemon=True).start()
             long_beep_played = True
-            # NEW: PRINT END BEEP
-            print("[EVENT] ♫ Final Beep Triggered (Maneuver Complete)")
+            # NEW: logger.info END BEEP
+            logger.info("[EVENT] ♫ Final Beep Triggered (Maneuver Complete)")
             # Send final beep event to client
-            if _SEND_ASYNC is not None:
+            if _SEND_ASYNC is not None and (not DEBUGGING):
                 event_data = {
                     "event": "beep_complete",
                     "type": "final_beep",
@@ -899,9 +1058,13 @@ def update(_):
                 except:
                     pass  # silently fail if no event loop
     else:
-        timer_text.set_text("0 s")
+        if DEBUGGING:
+            timer_text.set_text("0 s")
 
-    return line_p, line_fv, line_vt
+    if DEBUGGING:
+        return line_p, line_fv, line_vt
+    else:
+        return
 
 if DEBUGGING:
     ani = FuncAnimation(fig, update, interval=50, blit=False)
@@ -930,23 +1093,12 @@ if DEBUGGING:
         fa.OUTDIR = os.path.join(os.path.dirname(LOG_FILE), f"plots_{ts}")
         fa.SAVE_FIGS = True
 
-        print(f"\n[fetch→analysis] Using log: {fa.FILE}")
-        print(f"[fetch→analysis] Output dir: {fa.OUTDIR}")
+        logger.info(f"\n[fetch→analysis] Using log: {fa.FILE}")
+        logger.info(f"[fetch→analysis] Output dir: {fa.OUTDIR}")
 
-        # run full analysis (prints metrics + shows plots)
+        # run full analysis (logger.infos metrics + shows plots)
         fa.main()
-        print("[fetch→analysis] Analysis complete.")
+        logger.info("[fetch→analysis] Analysis complete.")
 
     except Exception as e:
-        print(f"[fetch→analysis] Failed to run analysis: {e}")
-
-ADC_MID = 1 << 23   # 8388608
-
-def to_u24_from_signal(y, scale):
-    """
-    Convert a physical signal (float) into 24-bit ADC-style data
-    """
-    return [
-        int(ADC_MID + v * scale) & 0xFFFFFF
-        for v in y
-    ]
+        logger.info(f"[fetch→analysis] Failed to run analysis: {e}")

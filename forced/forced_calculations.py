@@ -13,7 +13,12 @@ from collections import deque
 from typing import List, Iterable, Tuple
 import os
 import numpy as np
-import matplotlib.pyplot as plt
+
+DEBUGGING = False
+
+if DEBUGGING:
+    import matplotlib.pyplot as plt
+    
 import json
 import sys
 from scipy.signal import find_peaks
@@ -22,7 +27,7 @@ import csv
 #  IMPORT GLI REFERENCES 
 # Ensure 'GLI_2012_referencevalues.py' is in the same folder
 try:
-    from forced.GLI_2012_referencevalues import (
+    from GLI_2012_referencevalues import (
         equations, fev1_males, fev1_females, fvc_females, fvc_males, 
         fev1fvc_males, fev1fvc_females, fef2575_females, fef2575_males, 
         fef75_females, fef75_males
@@ -55,8 +60,6 @@ THRESH_ON_ABS  = 0.10
 PLOT = True
 SAVE_FIGS = True
 OUTDIR = "plots"
-
-DEBUGGING = False
 
 QC_MESSAGES = {
     "SLOW_START": {
@@ -105,10 +108,9 @@ def load_coeffs(filename):
         print(f"Error reading JSON {filename}: {e}")
         sys.exit(1)
 
-if DEBUGGING:
-    print("Loading Coefficients...")
-    pull_coefficients = load_coeffs("coeffs_pull.json")
-    push_coefficients = load_coeffs("coeffs_push.json")
+print("Loading Coefficients...")
+pull_coefficients = load_coeffs("coeffs_pull.json")
+push_coefficients = load_coeffs("coeffs_push.json")
 
 _SEND_ASYNC = None
 def set_sender(send_async_fn):

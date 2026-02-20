@@ -2,51 +2,39 @@
 from __future__ import annotations
 
 import sys
-import os
 import asyncio
 import websockets
 import threading
-from datetime import datetime, timedelta
-from pathlib import Path
-import tempfile
+import ctypes
+from ctypes import wintypes
+import logging
+
+def ensure_single_instance(name="ReMeDi_BleDataProcessor"):
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+    mutex = kernel32.CreateMutexW(
+        None,
+        wintypes.BOOL(True),
+        name
+    )
+
+    ERROR_ALREADY_EXISTS = 183
+    if ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
+        # Another instance is already running
+        sys.exit(0)
+
+    return mutex  # keep reference alive
 
 # ----------------------------
 # Paths / imports
 # ----------------------------
+from logging_config import setup_logging
 from tidal import TV_calculations, tidal_realtime_analysis
 from forced import finalResultCalculator, forced_realtime_data
 from UrineTest import OR_App
 
 URI = "ws://localhost:8444/bleDataProcessor/"
-DEBUG = True
-
-# ----------------------------
-# Logging (daily, keep last 10 days)
-# ----------------------------
-
-LOGS_DIR = Path(tempfile.gettempdir()) / "ReMeDi_Logs" / "BleDataProcessor" / "Logs"
-LOGS_DIR.mkdir(parents=True, exist_ok=True)
-
-LOG_PREFIX = "ble"           # logs become Logs/ble_YYYY-MM-DD.log
-DAYS_TO_KEEP = 10
-
-def get_daily_log_path(prefix: str = LOG_PREFIX) -> Path:
-    return LOGS_DIR / f"{prefix}_{datetime.now():%Y-%m-%d}.log"
-
-
-def cleanup_old_logs(days_to_keep: int = DAYS_TO_KEEP, prefix: str = LOG_PREFIX) -> None:
-    cutoff = datetime.now() - timedelta(days=days_to_keep)
-    for p in LOGS_DIR.glob(f"{prefix}_*.log"):
-        if not p.is_file():
-            continue
-        mtime = datetime.fromtimestamp(p.stat().st_mtime)
-        if mtime < cutoff:
-            try:
-                p.unlink()
-            except Exception:
-                # ignore deletion errors (file in use, permissions, etc.)
-                pass
-
+DEBUG = False
 
 class BleApplet:
     """BLEApplet with RPC methods from all imported modules"""
@@ -82,7 +70,7 @@ class BleApplet:
                     if not name.startswith('_') and callable(getattr(OR_App, name)):
                         setattr(self, f'OR_{name}', getattr(OR_App, name))
         except Exception as e:
-            print(f"Warning: Could not load module methods: {e}")
+            logger.error(f"Warning: Could not load module methods: {e}")
 
 
 class BleWebSocketHandler:
@@ -90,32 +78,19 @@ class BleWebSocketHandler:
         self.remote = None
         self.ble_applet = BleApplet()
         self.connected = False
-
-    def _write_log_line(self, line: str) -> None:
-        # rotate daily (handles midnight while running)
-        log_path = get_daily_log_path()
-        with open(log_path, "a", encoding="utf-8", buffering=1) as f:
-            f.write(line + "\n")
-
-    def log(self, msg: str) -> None:
-        timestamp = datetime.now().strftime("%Y/%m/%d %H:%M:%S")
-        line = f"[{timestamp}] {msg}"
-        if DEBUG:
-            print(line)
-        self._write_log_line(line)
-
+  
     async def on_connect(self, websocket):
         self.remote = websocket
         self.connected = True
-        self.log("**Connected")
+        logger.info("**Connected")
         self.ble_applet = BleApplet()
-        self.log("BleApplet instance created with all module methods")
+        logger.info("BleApplet instance created with all module methods")
 
         # Inject sender into tidal module (CRITICAL)        
         if 'tidal_realtime_analysis' in globals():
             tidal_realtime_analysis.set_sender(self.send_msg)
         else:
-            self.log("WARNING: tidal_realtime_analysis not loaded")
+            logger.warning("WARNING: tidal_realtime_analysis not loaded")
 
         if 'TV_calculations' in globals():
             TV_calculations.set_sender(self.send_msg)
@@ -126,29 +101,29 @@ class BleWebSocketHandler:
         if 'finalResultCalculator' in globals():
             finalResultCalculator.set_sender(self.send_msg)
 
-        if 'UrineTest' in globals():
+        if 'OR_App' in globals():
             OR_App.set_sender(self.send_msg)
 
     async def on_message(self, message: str):
         # Log raw incoming messages too (date-wise file in Logs/)
         # (keep it separate from self.log(...) formatting)
-        self._write_log_line(message.rstrip())
+        logger.info(message.rstrip())
 
         if DEBUG:
-            print(f"Received: {message}")
+            logger.info(f"Received: {message}")
 
         await self.call_jar_method(message)
 
     async def on_close(self, code, reason):
         self.connected = False
         self.remote = None
-        self.log(f"**Closed: {code} {reason}")
+        logger.info(f"**Closed: {code} {reason}")
 
     async def send_msg(self, message: str):
         if self.remote and self.connected:
             await self.remote.send(message)
         else:
-            self.log("ERROR: not connected, cannot send")
+            logger.info("ERROR: not connected, cannot send")
 
     async def call_jar_method(self, msg: str):
         parts = msg.split("~")
@@ -170,23 +145,23 @@ class BleWebSocketHandler:
                 if len(args) >= 4:
                     return await method(args[0], args[1], args[2], args[3]) if asyncio.iscoroutinefunction(method) else method(args[0], args[1], args[2], args[3])
             else:
-                self.log(f"ERROR: method not found: {method_name}")
+                logger.error(f"ERROR: method not found: {method_name}")
 
         except Exception as e:
-            self.log(f"ERROR calling {method_name}: {e}")
+            logger.error(f"ERROR calling {method_name}: {e}")
             import traceback
-            self.log(traceback.format_exc())
+            logger.error(traceback.format_exc())
 
     async def ws_listener(self):
         while True:
             try:
-                self.log(f"Connecting to {URI} ...")
+                logger.info(f"Connecting to {URI} ...")
                 async with websockets.connect(URI) as websocket:
                     await self.on_connect(websocket)
                     async for message in websocket:
                         await self.on_message(message)
             except Exception as e:
-                self.log(f"WebSocket loop error: {e}")
+                logger.error(f"WebSocket loop error: {e}")
                 await asyncio.sleep(2)
 
     def start_thread(self):
@@ -194,11 +169,16 @@ class BleWebSocketHandler:
             asyncio.run(self.ws_listener())
 
         threading.Thread(target=run, daemon=True).start()
-        self.log("WebSocket thread started")
+        logger.info("WebSocket thread started")
 
 
 if __name__ == "__main__":
-    cleanup_old_logs(days_to_keep=DAYS_TO_KEEP, prefix=LOG_PREFIX)
+
+    _mutex = ensure_single_instance()
+    
+    setup_logging()
+    logger = logging.getLogger(__name__)
+
     handler = BleWebSocketHandler()
     handler.start_thread()
 
@@ -207,4 +187,4 @@ if __name__ == "__main__":
             import time
             time.sleep(1)
     except KeyboardInterrupt:
-        print("Shutting down...")
+        logger.info("Shutting down...")

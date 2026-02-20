@@ -8,8 +8,9 @@ import json
 import sys
 from scipy.signal import find_peaks
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # add parent dir
-from spiro_encoder import prepare_spiro_data, prepare_spiro_triple
+import logging
+
+logger = logging.getLogger(__name__)
 
 #  IMPORT GLI REFERENCES 
 # Ensure 'GLI_2012_referencevalues.py' is in the same folder
@@ -20,7 +21,7 @@ try:
         fef75_females, fef75_males
     )
 except ImportError:
-    print("CRITICAL ERROR: 'GLI_2012_referencevalues.py' not found.")
+    logger.error("CRITICAL ERROR: 'GLI_2012_referencevalues.py' not found.")
     sys.exit(1)
 
 # Sampling period (seconds). 0.005 = 200 Hz
@@ -90,25 +91,24 @@ def load_coeffs(filename):
     file_path = resource_path(os.path.join("models", filename))
 
     if not os.path.exists(file_path):
-        print(f"\nCRITICAL ERROR: Could not find '{filename}' in 'models' folder.")
-        print(f"Path searched: {file_path}")
+        logger.info(f"\nCRITICAL ERROR: Could not find '{filename}' in 'models' folder.")
+        logger.info(f"Path searched: {file_path}")
         sys.exit(1)
 
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
-        print(f"[Realtime] Loaded {filename}")
+        logger.info(f"[Realtime] Loaded {filename}")
         return np.array(data["coeffs"], dtype=float)
 
     except Exception as e:
-        print(f"Error reading JSON {filename}: {e}")
+        logger.info(f"Error reading JSON {filename}: {e}")
         sys.exit(1)
 
-if DEBUGGING:
-    print("Loading Coefficients...")
-    pull_coefficients = load_coeffs("coeffs_pull.json")
-    push_coefficients = load_coeffs("coeffs_push.json")
+logger.info("Loading Coefficients...")
+pull_coefficients = load_coeffs("coeffs_pull.json")
+push_coefficients = load_coeffs("coeffs_push.json")
 
 def set_sender(send_async_fn):
     """
@@ -613,7 +613,7 @@ async def calculateFinalResult(p_raw):
     table_data = []
     if True:
         if p_raw.size == 0:
-            print("  [Skipped] No data found.")
+            logger.info("  [Skipped] No data found.")
             return
         
         pf = preprocess_one(p_raw)
@@ -650,7 +650,7 @@ async def calculateFinalResult(p_raw):
         qc = qc_spirometry(flow, vol, DT, metrics, extra, starts, ends)
 
         if qc["status"] == "FAIL":
-            print(f"  QC FAIL: {qc['codes']}")
+            logger.info(f"  QC FAIL: {qc['codes']}")
 
             # ADD QC STATUS SEND
             if _SEND_ASYNC is not None:
@@ -775,7 +775,7 @@ async def calculateFinalResult(p_raw):
                 fmt(csv_vol_vt[idx])    # Sparse VT Volume (Exhale only)
             ])
 
-        print(f"  [CSV Collection] {len(csv_data)} rows collected")
+        logger.info(f"  [CSV Collection] {len(csv_data)} rows collected")
         
         if csv_data and _SEND_ASYNC is not None:
             loop = asyncio.get_running_loop()
@@ -786,21 +786,49 @@ async def calculateFinalResult(p_raw):
             p = np.array([float(r[1]) for r in data_rows], dtype=float)
 
             # FIXED: Extract from FILTERED pairs only
-            valid_rows = [r for r in data_rows if r[2] != "" and r[3] != "" and r[4] != ""]
+            valid_rows = [r for r in data_rows if r[2] != "" and r[3] != ""]
             if valid_rows:
                 flow_fv  = np.array([float(r[2]) for r in valid_rows])  # FV Flow (col 2)
                 vol_fv   = np.array([float(r[3]) for r in valid_rows])  # FV Volume (col 3)
-                vt       = np.array([float(r[4]) for r in valid_rows])  # VT Volume (col 4)
-                
-                enc_triple = prepare_spiro_triple(flow_fv, vol_fv, vt)  # Flow, Vol, VT order
-                loop.create_task(_SEND_ASYNC(f"dataFromLib~108~spiroForcedFinalFlowVolumn~{json.dumps(enc_triple, separators=(',', ':'))}"))
+                #vt       = np.array([float(r[4]) for r in valid_rows])  # VT Volume (col 4)
+                vt_vals = [float(r[4]) for r in data_rows if r[4] != ""]
+                vt = max(vt_vals) if vt_vals else 0.0            
 
-            # Time-Pressure always
-            enc_tp = prepare_spiro_data(t, p, normalize=True)
-            loop.create_task(_SEND_ASYNC(f"dataFromLib~108~spiroForcedFinalTimePressure~{json.dumps(enc_tp, separators=(',', ':')) }"))
+                payload = {
+                    "x": flow_fv.tolist(),
+                    "y": vol_fv.tolist(),
+                    "z": [vt]
+                }
+
+                try:
+                    loop.create_task(_SEND_ASYNC(
+                    "dataFromLib~108~spiroForcedFinalFlowVolume~" + json.dumps(payload, separators=(",", ":")))
+                    )
+                except Exception as e:
+                    logger.info("[encoder] ERROR sending x/y/z:", e)
+                          
+            # Time–Volume (FULL CURVE)
+            # -------------------------------
+            vt_series = [float(r[4]) for r in data_rows if r[4] != ""]
+
+            time_series = t[:len(vt_series)].tolist()
+
+            payload = {
+                "x": time_series,
+                "y": vt_series
+            }
+
+            try:
+                loop.create_task(_SEND_ASYNC(
+                    "dataFromLib~108~spiroForcedFinalTimeVolume~" +
+                    json.dumps(payload, separators=(",", ":"))
+                ))
+            except Exception as e:
+                logger.info("[encoder] ERROR sending x / y:", e)
+            
 
     if not table_data:
-        print("No valid spirometry data processed.")
+        logger.info("No valid spirometry data processed.")
         return
 
     # Select best trials (ATS/ERS)
@@ -837,6 +865,6 @@ async def calculateFinalResult(p_raw):
             loop = asyncio.get_event_loop()
             loop.create_task(_SEND_ASYNC(f"dataFromLib~108~spiroForcedResults~{payload}"))
         
-        print("[SENT] Spirometry results:", final_vals_clean)
+        logger.info("[SENT] Spirometry results:", final_vals_clean)
     else:
-        print("ERROR: _SEND_ASYNC not injected")
+        logger.info("ERROR: _SEND_ASYNC not injected")

@@ -12,11 +12,21 @@ from collections import deque
 from typing import List, Iterable, Tuple
 import os
 import numpy as np
-import matplotlib.pyplot as plt
+
+from logging_config import setup_logging
+
+_SEND_ASYNC = None
+DEBUGGING = False
+
+if DEBUGGING:
+    import matplotlib.pyplot as plt
+    
 import json
 import sys
 from pathlib import Path
+import logging
 
+logger = logging.getLogger(__name__)
 # USER SETTINGS 
 #EDIT THIS TO THE LOG FILE
 FILE = Path("realtime_all") / "tidal_test.log"
@@ -35,9 +45,6 @@ END_MEAN_N   = 150   # samples used to estimate linear drift toward tail
 
 # Plot?
 PLOT = True
-
-_SEND_ASYNC = None
-DEBUGGING = False
 
 def resource_path(relative_path):
     """
@@ -58,25 +65,25 @@ def load_coeffs(filename):
     file_path = resource_path(os.path.join("models", filename))
 
     if not os.path.exists(file_path):
-        print(f"\nCRITICAL ERROR: Could not find '{filename}' in 'models' folder.")
-        print(f"Path searched: {file_path}")
+        logger.info(f"\nCRITICAL ERROR: Could not find '{filename}' in 'models' folder.")
+        logger.info(f"Path searched: {file_path}")
         sys.exit(1)
 
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
-        print(f"[Realtime] Loaded {filename}")
+        logger.info(f"[Realtime] Loaded {filename}")
         return np.array(data["coeffs"], dtype=float)
 
     except Exception as e:
-        print(f"Error reading JSON {filename}: {e}")
+        logger.info(f"Error reading JSON {filename}: {e}")
         sys.exit(1)
 
-if DEBUGGING:
-    print("Loading Coefficients")
-    pull_coefficients = load_coeffs("coeffs_pull.json")
-    push_coefficients = load_coeffs("coeffs_push.json")
+
+logger.info("Loading Coefficients")
+pull_coefficients = load_coeffs("coeffs_pull.json")
+push_coefficients = load_coeffs("coeffs_push.json")
 
 #Parsing
 def parse_log_file(file_path: str) -> np.ndarray:
@@ -262,7 +269,7 @@ def tidy_stats(values: list[float]) -> tuple[float,float,int]:
 
 def run_one(file_path: str):
     if not os.path.isfile(file_path):
-        print(f"ERROR: file not found: {file_path}")
+        logger.info(f"ERROR: file not found: {file_path}")
         return
 
     # 1) load & preprocess
@@ -292,22 +299,22 @@ def run_one(file_path: str):
         tv_note = "No valid segments found"
 
     # 4) report
-    print("\nTidal Volume Report")
-    print(f"File: {file_path}")
-    print(f"Samples (raw): {len(p_raw)}, Samples (filtered): {len(p_corr)}")
-    print(f"Segments found: inhales={n_inh}, exhales={n_exh}")
+    logger.info("\nTidal Volume Report")
+    logger.info(f"File: {file_path}")
+    logger.info(f"Samples (raw): {len(p_raw)}, Samples (filtered): {len(p_corr)}")
+    logger.info(f"Segments found: inhales={n_inh}, exhales={n_exh}")
     if np.isfinite(mean_inh):
-        print(f"Inhale peaks:  mean={mean_inh:.3f} L, std={std_inh:.3f} L, n={n_inh}")
+        logger.info(f"Inhale peaks:  mean={mean_inh:.3f} L, std={std_inh:.3f} L, n={n_inh}")
     else:
-        print("Inhale peaks:  none")
+        logger.info("Inhale peaks:  none")
     if np.isfinite(mean_exh):
-        print(f"Exhale peaks:  mean={mean_exh:.3f} L, std={std_exh:.3f} L, n={n_exh}")
+        logger.info(f"Exhale peaks:  mean={mean_exh:.3f} L, std={std_exh:.3f} L, n={n_exh}")
     else:
-        print("Exhale peaks:  none")
-    print(f"\nFinal TV: {TV:.3f} L  ({tv_note})")
+        logger.info("Exhale peaks:  none")
+    logger.info(f"\nFinal TV: {TV:.3f} L  ({tv_note})")
     true_volume = 3
     error = (true_volume - abs(TV))*100/true_volume
-    #print(f"Percentage error compared to true volume of {true_volume} L: {error:.2f} %")
+    #logger.info(f"Percentage error compared to true volume of {true_volume} L: {error:.2f} %")
 
     # 5) plot with shaded inhale/exhale regions
     if PLOT and len(p_corr) > 0:
@@ -376,26 +383,28 @@ async def calculateFinalTV(p_raw: np.ndarray):
         tv_note = "No valid segments found"
 
     # 4) report
-    print("\nTidal Volume Report")
-    print(f"File: RealTimeData Received for TV calculation")
-    print(f"Samples (raw): {len(p_raw)}, Samples (filtered): {len(p_corr)}")
-    print(f"Segments found: inhales={n_inh}, exhales={n_exh}")
+    logger.info("\nTidal Volume Report")
+    logger.info(f"File: RealTimeData Received for TV calculation")
+    logger.info(f"Samples (raw): {len(p_raw)}, Samples (filtered): {len(p_corr)}")
+    logger.info(f"Segments found: inhales={n_inh}, exhales={n_exh}")
     if np.isfinite(mean_inh):
-        print(f"Inhale peaks:  mean={mean_inh:.3f} L, std={std_inh:.3f} L, n={n_inh}")
+        logger.info(f"Inhale peaks:  mean={mean_inh:.3f} L, std={std_inh:.3f} L, n={n_inh}")
     else:
-        print("Inhale peaks:  none")
+        logger.info("Inhale peaks:  none")
     if np.isfinite(mean_exh):
-        print(f"Exhale peaks:  mean={mean_exh:.3f} L, std={std_exh:.3f} L, n={n_exh}")
+        logger.info(f"Exhale peaks:  mean={mean_exh:.3f} L, std={std_exh:.3f} L, n={n_exh}")
     else:
-        print("Exhale peaks:  none")
-    print(f"\nFinal TV: {TV:.3f} L  ({tv_note})")
+        logger.info("Exhale peaks:  none")
+    logger.info(f"\nFinal TV: {TV:.3f} L  ({tv_note})")
     
     if _SEND_ASYNC is not None:
         await _SEND_ASYNC(f"resultTVFromLib~{TV:.3f}")
     else:
-        print("ERROR: _SEND_ASYNC not injected")
+        logger.info("ERROR: _SEND_ASYNC not injected")
 
 if DEBUGGING:
     #ENTRY POINT
     if __name__ == "__main__":
+        setup_logging()
+        logger = logging.getLogger(__name__)
         run_one(FILE)

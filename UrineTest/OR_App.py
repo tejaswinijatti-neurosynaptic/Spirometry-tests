@@ -1,13 +1,27 @@
+import asyncio
 import os
 import json
 import math
 import numpy as np
 import cv2
 import sys
-import matplotlib.pyplot as plt
+from pathlib import Path
+
+sys.path.append(str(Path(__file__).resolve().parent.parent))
+
+from logging_config import setup_logging
+
+DEBUGGING = False
+if DEBUGGING:
+    import matplotlib.pyplot as plt
+
 from scipy.signal import find_peaks, peak_widths
 from colormath.color_objects import LabColor
 from colormath.color_diff import delta_e_cie2000
+
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Declare as globals
 test_img_path = None
@@ -17,8 +31,6 @@ test_lib_path = None
 
 _SEND_ASYNC = None
 _encoder_task = None
-DEBUGGING = False
-
 
 def set_sender(send_async_fn):
     """
@@ -84,9 +96,9 @@ def deskew_and_crop(img):
     angle = calculate_skew_angle(edges_in_roi, w)
 
     if angle != 0.0:
-        print(f"Detected skew angle = {angle:.2f}°")
+        logger.info(f"Detected skew angle = {angle:.2f}°")
     else:
-        print("No suitable horizontal lines found for deskewing. Using original image.")
+        logger.info("No suitable horizontal lines found for deskewing. Using original image.")
 
     # Rotate and crop
     rotated = rotate_image(img, angle)
@@ -102,22 +114,54 @@ def roiextraction(cropped) :
    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
    std_dev = np.std(gray)
-   #print(std_dev)
+   #logger.info(std_dev)
 # Check if gray values are uniform
    if std_dev < 5:
-    print("Image is completely uniform (blank).")
+    logger.info("Image is completely uniform (blank).")
+    
+    result = {
+        "message":"Image is blank",
+        "status":"failed"
+    }
+
+    if _SEND_ASYNC is not None:
+        payload = json.dumps(result)
+        msg = f"OR_RESULT~{payload}"
+        logger.info("[DEBUG] Sending OR_RESULT to socket")
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(_SEND_ASYNC(msg))
+        except RuntimeError:
+            asyncio.run(_SEND_ASYNC(msg))
+
     raise ValueError("Image is blank")
    else:
-    print("The image is not blank.")
+    logger.info("The image is not blank.")
    # Compute Laplacian
    laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var() 
-   #print('laplacian_var')
-   #print(laplacian_var)
+   #logger.info('laplacian_var')
+   #logger.info(laplacian_var)
    if laplacian_var < 150:
-       print('Image is blurred')
+       logger.info('Image is blurred')
+       
+       result = {
+            "message":"Image is blurred",
+            "status":"failed"
+       }
+
+       if _SEND_ASYNC is not None:
+        payload = json.dumps(result)
+        msg = f"OR_RESULT~{payload}"
+        logger.info("[DEBUG] Sending OR_RESULT to socket")
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(_SEND_ASYNC(msg))
+        except RuntimeError:
+            asyncio.run(_SEND_ASYNC(msg))
+
        raise ValueError("Image is blurred")
    else:
-       print('The image is not blurred')
+       logger.info('The image is not blurred')
    #plt.imshow(gray)
    #plt.title('gray')
    #plt.show()
@@ -151,11 +195,11 @@ def roiextraction(cropped) :
    # Find columns and rows to keep
    cols_to_keep = np.where(avg_along_y > 50)[0]
    rows_to_keep = np.where(avg_along_x > 16)[0]
-   #print(cols_to_keep)
-   #print(rows_to_keep)
+   #logger.info(cols_to_keep)
+   #logger.info(rows_to_keep)
 
    if len(cols_to_keep) == 0 or len(rows_to_keep) == 0:
-     print('No strip found')
+     logger.info('No strip found')
      raise ValueError("No region found matching the specified average intensity conditions.")
 
 
@@ -167,7 +211,7 @@ def roiextraction(cropped) :
    #plt.title('cropped_img')
    #plt.show()
    height,width= cropped_img.shape[:2]
-   #print(f"height:{height},width:{width}")
+   #logger.info(f"height:{height},width:{width}")
    if height >23 :
     cropped_img= cropped_img[-20:-2,:]
    
@@ -232,7 +276,7 @@ def compute_highlighted_derivative(sig, deriv_thresh):
 
     return d, d_high
 
-def find_and_merge_peaks(R_nb, G_nb, B_nb, Y_nb, height_thresh=5, merge_distance=6):
+def find_and_merge_peaks(R_nb, G_nb, B_nb, Y_nb, image_width, height_thresh=5, merge_distance=6):
 
     deriv_thresh = 3
     R_d, R_dh = compute_highlighted_derivative(R_nb, deriv_thresh)
@@ -283,7 +327,8 @@ def find_and_merge_peaks(R_nb, G_nb, B_nb, Y_nb, height_thresh=5, merge_distance
     blank_ranges = [] 
     pad_ranges = []
 
-    image_width = test_img.shape[1]
+    #image_width = test_img.shape[1]
+    #Taking this from parameter
 
     i = 0
     expecting = None
@@ -360,8 +405,8 @@ def find_and_merge_peaks(R_nb, G_nb, B_nb, Y_nb, height_thresh=5, merge_distance
         x1_orig = x1 + offset
         pad_peak_pairs.append((x0_orig, x1_orig))
 
-    #print("Merged Peak Coordinates (with offset):", peak_coords)
-    #print("Pad Regions:", pad_peak_pairs)
+    #logger.info("Merged Peak Coordinates (with offset):", peak_coords)
+    #logger.info("Pad Regions:", pad_peak_pairs)
 
     return merged_peaks, pad_ranges, blank_ranges
 
@@ -382,10 +427,10 @@ def store_pad_regions(img, pad_ranges, offset=0, merged_peaks=None, output_dir='
         in_valid_range = any(x0 + offset <= last_peak <= x1 + offset for x0, x1 in pad_ranges)
 
         if not in_valid_range:
-            print(f"Last peak {last_peak} is in blank region. Excluding it.")
+            logger.info(f"Last peak {last_peak} is in blank region. Excluding it.")
             merged_peaks_offset.pop()  # Remove last peak
         else:
-            print(f"Last peak {last_peak} is within a valid pad region. Keeping it.")
+            logger.info(f"Last peak {last_peak} is within a valid pad region. Keeping it.")
 
     pad_peak_pairs = []
     pad_colours= []
@@ -394,7 +439,7 @@ def store_pad_regions(img, pad_ranges, offset=0, merged_peaks=None, output_dir='
         x0_orig = x0 + offset
         x1_orig = x1 + offset
         pad_peak_pairs.append((x0_orig, x1_orig))
-        print(pad_peak_pairs)
+        logger.info(pad_peak_pairs)
 
     # Save cropped regions
     os.makedirs(output_dir, exist_ok=True)
@@ -417,33 +462,33 @@ def store_pad_regions(img, pad_ranges, offset=0, merged_peaks=None, output_dir='
             avg_color = cv2.mean(crop_centre)[:3] 
             pad_colours.append(avg_color)
             cv2.imwrite(filename, crop)
-            print(f"Saved pad_{i}.png: x = {x0 + offset} to {x1 + offset}")
-            print(pad_colours)
-            print(len(pad_colours))
-            print(f"Saved pad_{i}.png: x = {x0 + offset} to {x1 + offset}")
+            logger.info(f"Saved pad_{i}.png: x = {x0 + offset} to {x1 + offset}")
+            logger.info(pad_colours)
+            logger.info(len(pad_colours))
+            logger.info(f"Saved pad_{i}.png: x = {x0 + offset} to {x1 + offset}")
         else:
-            print(f"Skipped pad_{i}: invalid region x = {x0} to {x1}")
+            logger.info(f"Skipped pad_{i}: invalid region x = {x0} to {x1}")
     
     return pad_peak_pairs, merged_peaks_offset, pad_colours, all_crops
 def rgbtolab(pad_colours):
-    #print('pad_colours')
-    #print(pad_colours)
+    #logger.info('pad_colours')
+    #logger.info(pad_colours)
     bgr_array = np.array([[ [b, g, r] for r, g, b in pad_colours ]], dtype=np.float32)
     # Step 3: Normalize to 0–1 range for OpenCV if needed (some versions require this for float32)
-    #print(bgr_array)
+    #logger.info(bgr_array)
     bgr_array /= 255.0
-    #print(bgr_array)
+    #logger.info(bgr_array)
 # Convert to Lab
     lab_array = cv2.cvtColor(bgr_array, cv2.COLOR_BGR2Lab)
    
-    #print(pad_colours)
-    #print(lab_array)
+    #logger.info(pad_colours)
+    #logger.info(lab_array)
 # Flatten to get Lab values in a list
     lab_colours = [tuple(map(float, lab_array[0][i])) for i in range(len(pad_colours))]
-    #print(lab_colours)
-# Print result
+    #logger.info(lab_colours)
+# logger.info result
     for i, (rgb, lab) in enumerate(zip(pad_colours, lab_colours)):
-        print(f"Color {i + 1} - RGB: {rgb} -> Lab: {lab}")
+        logger.info(f"Color {i + 1} - RGB: {rgb} -> Lab: {lab}")
     
     
     return lab_colours
@@ -453,26 +498,26 @@ def bgcomp(lab_colours,data):
        deltaE_bg_list=[]
        for patchdetail in data['pads'][0]['patchdetails']:
          bg_value[patchdetail['bloodvalue']] = np.array(patchdetail['L,a,bvalues'], dtype=np.float32) 
-       print('bg')
+       logger.info('bg')
        for key, value in bg_value.items():
           if len(value) >= 3:  # or value.shape[0] >= 3 if it's a NumPy array
             L1, a1, b1 = value[0], value[1], value[2]  # Access elements directly
             L2, a2, b2 = lab_colours[9]
-            #print(L2,a2,b2)
+            #logger.info(L2,a2,b2)
             color1 = LabColor(lab_l=L1, lab_a=a1, lab_b=b1)
             color2 = LabColor(lab_l=L2, lab_a=a2, lab_b=b2)
 
          # Compute Delta E 2000
             deltaE_bg = float(delta_e_cie2000(color1, color2))
-            #print(f"Delta E 2000: {deltaE_bg:.2f}")
+            #logger.info(f"Delta E 2000: {deltaE_bg:.2f}")
             deltaE_bg_list.append(deltaE_bg)
        min_bg= min(deltaE_bg_list)
        min_index_bg = deltaE_bg_list.index(min_bg)
-       #print(min_index_bg)
-       #print(deltaE_bg_list)
-       #print(len(deltaE_bg_list))
+       #logger.info(min_index_bg)
+       #logger.info(deltaE_bg_list)
+       #logger.info(len(deltaE_bg_list))
        blood  = data['pads'][0]["patchdetails"][min_index_bg]["bloodvalue"]
-       #print(blood)
+       #logger.info(blood)
 
        return blood
 def bilirubincomp(lab_colours,data):
@@ -481,26 +526,26 @@ def bilirubincomp(lab_colours,data):
        deltaE_bilirubin_list=[]
        for patchdetail in data['pads'][1]['patchdetails']:
          bilirubin_value[patchdetail['bilirubinvalue']] = np.array(patchdetail['L,a,bvalues'], dtype=np.float32) 
-         #print('bilirubin')
+         #logger.info('bilirubin')
        for key, value in bilirubin_value.items():
           if len(value) >= 3:  # or value.shape[0] >= 3 if it's a NumPy array
             L1, a1, b1 = value[0], value[1], value[2]  # Access elements directly
             L2, a2, b2 = lab_colours[8]
-            #print(L2,a2,b2)
+            #logger.info(L2,a2,b2)
             color1 = LabColor(lab_l=L1, lab_a=a1, lab_b=b1)
             color2 = LabColor(lab_l=L2, lab_a=a2, lab_b=b2)
 
          # Compute Delta E 2000
             deltaE_bilirubin = float(delta_e_cie2000(color1, color2))
-            #print(f"Delta E 2000: {deltaE_bilirubin:.2f}")
+            #logger.info(f"Delta E 2000: {deltaE_bilirubin:.2f}")
             deltaE_bilirubin_list.append(deltaE_bilirubin)
        min_bilirubin= min(deltaE_bilirubin_list)
        min_index_bilirubin = deltaE_bilirubin_list.index(min_bilirubin)
-       #print(min_index_bilirubin)
-       #print(deltaE_bilirubin_list)
-       #print(len(deltaE_bilirubin_list))
+       #logger.info(min_index_bilirubin)
+       #logger.info(deltaE_bilirubin_list)
+       #logger.info(len(deltaE_bilirubin_list))
        bilirubin  = data['pads'][1]["patchdetails"][min_index_bilirubin]["bilirubinvalue"]
-       #print(bilirubin)
+       #logger.info(bilirubin)
 
        return bilirubin
 def urocomp(lab_colours,data):
@@ -509,27 +554,27 @@ def urocomp(lab_colours,data):
       deltaE_uro_list=[]
       for patchdetail in data['pads'][2]['patchdetails']:
         uro_value[patchdetail['urobilinogenvalue']] = np.array(patchdetail['L,a,bvalues'], dtype=np.float32) 
-      #print('uro')
+      #logger.info('uro')
       for key, value in uro_value.items():
         if len(value) >= 3:  # or value.shape[0] >= 3 if it's a NumPy array
            L1, a1, b1 = value[0], value[1], value[2]  # Access elements directly
            L2, a2, b2 = lab_colours[7]
-           #print(L2,a2,b2)
+           #logger.info(L2,a2,b2)
            color1 = LabColor(lab_l=L1, lab_a=a1, lab_b=b1)
            color2 = LabColor(lab_l=L2, lab_a=a2, lab_b=b2)
 
          # Compute Delta E 2000
            deltaE_uro = float( delta_e_cie2000(color1, color2))
-           #print(f"Delta E 2000: {deltaE_uro:.2f}")
+           #logger.info(f"Delta E 2000: {deltaE_uro:.2f}")
            deltaE_uro_list.append(deltaE_uro)
       min_uro= min(deltaE_uro_list)
       min_index_uro = deltaE_uro_list.index(min_uro)
-      #print(min_index_uro)
-      #print(f"Delta E 2000: {deltaE_uro:.2f}")
-      #print(deltaE_uro_list)
-      #print(len(deltaE_uro_list))
+      #logger.info(min_index_uro)
+      #logger.info(f"Delta E 2000: {deltaE_uro:.2f}")
+      #logger.info(deltaE_uro_list)
+      #logger.info(len(deltaE_uro_list))
       urobilinogen  = data['pads'][2]["patchdetails"][min_index_uro]["urobilinogenvalue"]
-      #print(urobilinogen)
+      #logger.info(urobilinogen)
 
       return urobilinogen
 def ketonecomp(lab_colours,data):
@@ -538,27 +583,27 @@ def ketonecomp(lab_colours,data):
       deltaE_ketone_list=[]
       for patchdetail in data['pads'][3]['patchdetails']:
         ketone_value[patchdetail['ketonesvalues']] = np.array(patchdetail['L,a,bvalues'], dtype=np.float32) 
-      #print('ketone')
+      #logger.info('ketone')
       for key, value in ketone_value.items():
          if len(value) >= 3:  # or value.shape[0] >= 3 if it's a NumPy array
            L1, a1, b1 = value[0], value[1], value[2]  # Access elements directly
            L2, a2, b2 = lab_colours[6]
-           #print(L2,a2,b2)
+           #logger.info(L2,a2,b2)
            color1 = LabColor(lab_l=L1, lab_a=a1, lab_b=b1)
            color2 = LabColor(lab_l=L2, lab_a=a2, lab_b=b2)
 
          # Compute Delta E 2000
            deltaE_ketone = float(delta_e_cie2000(color1, color2))
-           #print(f"Delta E 2000: {deltaE_ketone:.2f}")
+           #logger.info(f"Delta E 2000: {deltaE_ketone:.2f}")
            deltaE_ketone_list.append(deltaE_ketone)
       min_ketone= min(deltaE_ketone_list)
       min_index_ketone = deltaE_ketone_list.index(min_ketone)
-      #print(min_index_ketone)
-      #print(f"Delta E 2000: {deltaE_ketone:.2f}")
-      #print(deltaE_ketone_list)
-      #print(len(deltaE_ketone_list))
+      #logger.info(min_index_ketone)
+      #logger.info(f"Delta E 2000: {deltaE_ketone:.2f}")
+      #logger.info(deltaE_ketone_list)
+      #logger.info(len(deltaE_ketone_list))
       ketones  = data['pads'][3]["patchdetails"][min_index_ketone]["ketonesvalues"]
-      #print(ketones)
+      #logger.info(ketones)
 
       return ketones
 def proteincomp(lab_colours,data):
@@ -567,26 +612,26 @@ def proteincomp(lab_colours,data):
        deltaE_pro_list=[]
        for patchdetail in data['pads'][4]['patchdetails']:
         pro_value[patchdetail['proteinvalue']] = np.array(patchdetail['L,a,bvalues'], dtype=np.float32) 
-       #print('pro') 
+       #logger.info('pro') 
        for key, value in pro_value.items():
          if len(value) >= 3:  # or value.shape[0] >= 3 if it's a NumPy array
            L1, a1, b1 = value[0], value[1], value[2]  # Access elements directly
            L2, a2, b2 = lab_colours[5]
-           #print(L2,a2,b2)
+           #logger.info(L2,a2,b2)
            color1 = LabColor(lab_l=L1, lab_a=a1, lab_b=b1)
            color2 = LabColor(lab_l=L2, lab_a=a2, lab_b=b2)
 
          # Compute Delta E 2000
            deltaE_pro = float(delta_e_cie2000(color1, color2))
-           #print(f"Delta E 2000: {deltaE_pro:.2f}")
+           #logger.info(f"Delta E 2000: {deltaE_pro:.2f}")
            deltaE_pro_list.append(deltaE_pro)
        min_pro= min(deltaE_pro_list)
        min_index_pro = deltaE_pro_list.index(min_pro)
-       #print(min_index_pro)
-       #print(deltaE_pro_list)
-       #print(len(deltaE_pro_list))
+       #logger.info(min_index_pro)
+       #logger.info(deltaE_pro_list)
+       #logger.info(len(deltaE_pro_list))
        protein  = data['pads'][4]["patchdetails"][min_index_pro]["proteinvalue"]
-       #print(protein)
+       #logger.info(protein)
 
        return protein
 def nitritecomp(lab_colours,data):
@@ -595,26 +640,26 @@ def nitritecomp(lab_colours,data):
       deltaE_nit_list=[]
       for patchdetail in data['pads'][5]['patchdetails']:
         nit_value[patchdetail['nitritesvalue']] = np.array(patchdetail['L,a,bvalues'], dtype=np.float32) 
-      #print('nit')
+      #logger.info('nit')
       for key, value in nit_value.items():
          if len(value) >= 3:  # or value.shape[0] >= 3 if it's a NumPy array
            L1, a1, b1 = value[0], value[1], value[2]  # Access elements directly
            L2, a2, b2 = lab_colours[4]
-           #print(L2,a2,b2)
+           #logger.info(L2,a2,b2)
            color1 = LabColor(lab_l=L1, lab_a=a1, lab_b=b1)
            color2 = LabColor(lab_l=L2, lab_a=a2, lab_b=b2)
 
          # Compute Delta E 2000
            deltaE_nit = float( delta_e_cie2000(color1, color2))
-           #print(f"Delta E 2000: {deltaE_nit:.2f}")
+           #logger.info(f"Delta E 2000: {deltaE_nit:.2f}")
            deltaE_nit_list.append(deltaE_nit)
       min_nit= min(deltaE_nit_list)
       min_index_nit = deltaE_nit_list.index(min_nit)
-      #print(min_index_nit)
-      #print(deltaE_nit_list)
-      #print(len(deltaE_nit_list))
+      #logger.info(min_index_nit)
+      #logger.info(deltaE_nit_list)
+      #logger.info(len(deltaE_nit_list))
       nitrites = data['pads'][5]["patchdetails"][min_index_nit]["nitritesvalue"]
-      #print(nitrites)
+      #logger.info(nitrites)
 
       return nitrites
 def glucosecomp(lab_colours,data):
@@ -623,17 +668,17 @@ def glucosecomp(lab_colours,data):
        deltaE_glucose_list=[]
        for patchdetail in data['pads'][6]['patchdetails']:
         glucose_value[patchdetail['glucosevalue']] = np.array(patchdetail['L,a,bvalues'], dtype=np.float32) 
-       #print('glucose')
+       #logger.info('glucose')
        for key, value in glucose_value.items():
           if len(value) >= 3:  # or value.shape[0] >= 3 if it's a NumPy array
             L1, a1, b1 = value[0], value[1], value[2]  # Access elements directly
             L2, a2, b2 = lab_colours[3]
-            #print(L2,a2,b2)
+            #logger.info(L2,a2,b2)
             L1= L1.item()
             a1 = a1. item()
             b1 = b1.item()
-            #print(pad_colours[3])
-            #print(L1,a1,b1)
+            #logger.info(pad_colours[3])
+            #logger.info(L1,a1,b1)
            # Convert to Python float explicitly (safe even if already float)
             L1, a1, b1 = float(L1), float(a1), float(b1)
             L2, a2, b2 = float(L2), float(a2), float(b2)
@@ -643,10 +688,10 @@ def glucosecomp(lab_colours,data):
            #color1_np = np.array([L1, a1, b1], dtype=np.float32)
            #color2_np = np.array([L2, a2, b2], dtype=np.float32)
            #color2_np = tuple(int(x) for x in color2_np)
-           #print(color1_np)
-           #print(color2_np)
+           #logger.info(color1_np)
+           #logger.info(color2_np)
            #color2_np = np.array([color2_np], dtype=np.uint8)
-           #print(color2_np)
+           #logger.info(color2_np)
            # Step 1: Create LabColor objects from your Lab values
             lab1 = LabColor(lab_l=L1, lab_a=a1, lab_b=b1)
             lab2 = LabColor(lab_l=L2, lab_a=a2, lab_b=b2)
@@ -656,12 +701,12 @@ def glucosecomp(lab_colours,data):
             deltaE_glucose_list.append(deltaE_glucose)
        min_glucose= min(deltaE_glucose_list)
        min_index_glucose = deltaE_glucose_list.index(min_glucose)
-       #print(min_index_glucose)
-       #print(f"Delta E 2000: {deltaE_glucose:.2f}")
-       #print(deltaE_glucose_list)
-       #print(len(deltaE_glucose_list))
+       #logger.info(min_index_glucose)
+       #logger.info(f"Delta E 2000: {deltaE_glucose:.2f}")
+       #logger.info(deltaE_glucose_list)
+       #logger.info(len(deltaE_glucose_list))
        glucose  = data['pads'][6]["patchdetails"][min_index_glucose]["glucosevalue"]
-       #print(glucose)
+       #logger.info(glucose)
        return glucose 
 def phcomp(lab_colours,data):
        ph_value={}
@@ -669,26 +714,26 @@ def phcomp(lab_colours,data):
        deltaE_ph_list=[]
        for patchdetail in data['pads'][7]['patchdetails']:
          ph_value[patchdetail['pHvalue']] = np.array(patchdetail['L,a,bvalues'], dtype=np.float32) 
-         #print('pH')
+         #logger.info('pH')
        for key, value in ph_value.items():
          if len(value) >= 3:  # or value.shape[0] >= 3 if it's a NumPy array
            L1, a1, b1 = value[0], value[1], value[2]  # Access elements directly
            L2, a2, b2 = lab_colours[2]
-           #print(L2,a2,b2)
+           #logger.info(L2,a2,b2)
            color1 = LabColor(lab_l=L1, lab_a=a1, lab_b=b1)
            color2 = LabColor(lab_l=L2, lab_a=a2, lab_b=b2)
 
          # Compute Delta E 2000
            deltaE_ph = float(delta_e_cie2000(color1, color2))
-           #print(f"Delta E 2000: {deltaE_ph:.2f}")
+           #logger.info(f"Delta E 2000: {deltaE_ph:.2f}")
            deltaE_ph_list.append(deltaE_ph)
        min_ph= min(deltaE_ph_list)
        min_index_ph = deltaE_ph_list.index(min_ph)
-       #print(min_index_ph)
-       #print(deltaE_ph_list)
-       #print(len(deltaE_ph_list))
+       #logger.info(min_index_ph)
+       #logger.info(deltaE_ph_list)
+       #logger.info(len(deltaE_ph_list))
        pH  = data['pads'][7]["patchdetails"][min_index_ph]["pHvalue"]
-       #print(pH)
+       #logger.info(pH)
        return pH
 def sgcomp(lab_colours,data):
        sg_value={}
@@ -696,26 +741,26 @@ def sgcomp(lab_colours,data):
        deltaE_sg_list=[]
        for patchdetail in data['pads'][8]['patchdetails']:
         sg_value[patchdetail['specificgravityvalue']] = np.array(patchdetail['L,a,bvalues'], dtype=np.float32) 
-       #print('sg')
+       #logger.info('sg')
        for key, value in sg_value.items():
          if len(value) >= 3:  # or value.shape[0] >= 3 if it's a NumPy array
            L1, a1, b1 = value[0], value[1], value[2]  # Access elements directly
            L2, a2, b2 = lab_colours[1]
-           #print(L2,a2,b2)
+           #logger.info(L2,a2,b2)
            color1 = LabColor(lab_l=L1, lab_a=a1, lab_b=b1)
            color2 = LabColor(lab_l=L2, lab_a=a2, lab_b=b2)
 
          # Compute Delta E 2000
            deltaE_sg = float(delta_e_cie2000(color1, color2))
-           #print(f"Delta E 2000: {deltaE_sg:.2f}")
+           #logger.info(f"Delta E 2000: {deltaE_sg:.2f}")
            deltaE_sg_list.append(deltaE_sg)
        min_sg= min(deltaE_sg_list)
        min_index_sg = deltaE_sg_list.index(min_sg)
-       #print(min_index_sg)
-       #print(deltaE_sg_list)
-       #print(len(deltaE_sg_list))
+       #logger.info(min_index_sg)
+       #logger.info(deltaE_sg_list)
+       #logger.info(len(deltaE_sg_list))
        specificgravity  = data['pads'][8]["patchdetails"][min_index_sg]["specificgravityvalue"]
-       #print(specificgravity)
+       #logger.info(specificgravity)
        return specificgravity
          
 def leukocytescomp(lab_colours,data):
@@ -724,26 +769,26 @@ def leukocytescomp(lab_colours,data):
       deltaE_leu_list=[]
       for patchdetail in data['pads'][9]['patchdetails']:
         leu_value[patchdetail['leukocytesvalue']] = np.array(patchdetail['L,a,bvalues'], dtype=np.float32) 
-      #print('leu')
+      #logger.info('leu')
       for key, value in leu_value.items():
          if len(value) >= 3:  # or value.shape[0] >= 3 if it's a NumPy array
            L1, a1, b1 = value[0], value[1], value[2]  # Access elements directly
            L2, a2, b2 = lab_colours[0]
-           #print(L2,a2,b2)
+           #logger.info(L2,a2,b2)
            color1 = LabColor(lab_l=L1, lab_a=a1, lab_b=b1)
            color2 = LabColor(lab_l=L2, lab_a=a2, lab_b=b2)
 
          # Compute Delta E 2000
            deltaE_leu = float(delta_e_cie2000(color1, color2))
-           #print(f"Delta E 2000: {deltaE_leu:.2f}")
+           #logger.info(f"Delta E 2000: {deltaE_leu:.2f}")
            deltaE_leu_list.append(deltaE_leu)
       min_leu= min(deltaE_leu_list)
       min_index_leu = deltaE_leu_list.index(min_leu)
-      #print(min_index_leu)
-      #print(deltaE_leu_list)
-      #print(len(deltaE_leu_list))
+      #logger.info(min_index_leu)
+      #logger.info(deltaE_leu_list)
+      #logger.info(len(deltaE_leu_list))
       leukocytes  = data['pads'][9]["patchdetails"][min_index_leu]["leukocytesvalue"]
-      #print(leukocytes)
+      #logger.info(leukocytes)
       return leukocytes
  
 def finalimageformation(all_crops):
@@ -793,82 +838,76 @@ def plot_diagnostics(
       2) abs derivative + blank/pad regions + peaks
       3) the strip image
     """
+    if DEBUGGING:
+        deriv_thresh = 3
+        R_d,  R_dh = compute_highlighted_derivative(R_nb, deriv_thresh)
+        G_d,  G_dh = compute_highlighted_derivative(G_nb, deriv_thresh)
+        B_d,  B_dh = compute_highlighted_derivative(B_nb, deriv_thresh)
+        # Y channel derivative if you need it…
 
-    deriv_thresh = 3
-    R_d,  R_dh = compute_highlighted_derivative(R_nb, deriv_thresh)
-    G_d,  G_dh = compute_highlighted_derivative(G_nb, deriv_thresh)
-    B_d,  B_dh = compute_highlighted_derivative(B_nb, deriv_thresh)
-    # Y channel derivative if you need it…
+        R_abs_d      = np.abs(R_dh)
+        G_abs_d      = np.abs(G_dh)
+        B_abs_d      = np.abs(B_dh)
+        RGB_max_abs_d = np.maximum.reduce([R_abs_d, G_abs_d, B_abs_d])
 
-    R_abs_d      = np.abs(R_dh)
-    G_abs_d      = np.abs(G_dh)
-    B_abs_d      = np.abs(B_dh)
-    RGB_max_abs_d = np.maximum.reduce([R_abs_d, G_abs_d, B_abs_d])
+        fig, axs = plt.subplots(4, 1, figsize=(14, 10), sharex=True)
 
-    fig, axs = plt.subplots(4, 1, figsize=(14, 10), sharex=True)
+        # 0: Raw vs Cleaned
+        axs[0].plot(R_line, label='Red Raw',    alpha=0.8)
+        axs[0].plot(G_line, label='Green Raw')
+        axs[0].plot(B_line, label='Blue Raw')
+        axs[0].plot(R_nb,   '--', label='Red Cleaned')
+        axs[0].plot(G_nb,   '--', label='Green Cleaned')
+        axs[0].plot(B_nb,   '--', label='Blue Cleaned')
+        axs[0].set_title("Raw Signals vs. De-spiked Signals")
+        axs[0].legend(); axs[0].grid(True)
 
-    # 0: Raw vs Cleaned
-    axs[0].plot(R_line, label='Red Raw',    alpha=0.8)
-    axs[0].plot(G_line, label='Green Raw')
-    axs[0].plot(B_line, label='Blue Raw')
-    axs[0].plot(R_nb,   '--', label='Red Cleaned')
-    axs[0].plot(G_nb,   '--', label='Green Cleaned')
-    axs[0].plot(B_nb,   '--', label='Blue Cleaned')
-    axs[0].set_title("Raw Signals vs. De-spiked Signals")
-    axs[0].legend(); axs[0].grid(True)
+        # 1: Highlighted substantial changes
+        axs[1].plot(R_dh, label=f'|dR| ≥ {deriv_thresh}')
+        axs[1].plot(G_dh, label=f'|dG| ≥ {deriv_thresh}')
+        axs[1].plot(B_dh, label=f'|dB| ≥ {deriv_thresh}')
+        axs[1].set_title("Highlighted Substantial Changes")
+        axs[1].legend(); axs[1].grid(True)
 
-    # 1: Highlighted substantial changes
-    axs[1].plot(R_dh, label=f'|dR| ≥ {deriv_thresh}')
-    axs[1].plot(G_dh, label=f'|dG| ≥ {deriv_thresh}')
-    axs[1].plot(B_dh, label=f'|dB| ≥ {deriv_thresh}')
-    axs[1].set_title("Highlighted Substantial Changes")
-    axs[1].legend(); axs[1].grid(True)
+        # 2: Absolute derivative + regions + peaks
+        axs[2].plot(np.abs(R_dh), label='|dR|')
+        axs[2].plot(np.abs(G_dh), label='|dG|')
+        axs[2].plot(np.abs(B_dh), label='|dB|')
+        axs[2].plot(merged_peaks, RGB_max_abs_d[merged_peaks], "rx", label="Merged Peaks")
+        for x0, x1 in blank_ranges:
+            axs[2].axvspan(x0, x1, color='lightgrey', alpha=0.4,
+                        label='Blank Region' if x0 == blank_ranges[0][0] else "")
+        for x0, x1 in pad_ranges:
+            axs[2].axvspan(x0, x1, color='lightgreen', alpha=0.7,
+                        label='Color Pad' if x0 == pad_ranges[0][0] else "")
+        axs[2].set_title("Absolute Derivative + Region Classification")
+        axs[2].legend(); axs[2].grid(True)
 
-    # 2: Absolute derivative + regions + peaks
-    axs[2].plot(np.abs(R_dh), label='|dR|')
-    axs[2].plot(np.abs(G_dh), label='|dG|')
-    axs[2].plot(np.abs(B_dh), label='|dB|')
-    axs[2].plot(merged_peaks, RGB_max_abs_d[merged_peaks], "rx", label="Merged Peaks")
-    for x0, x1 in blank_ranges:
-        axs[2].axvspan(x0, x1, color='lightgrey', alpha=0.4,
-                       label='Blank Region' if x0 == blank_ranges[0][0] else "")
-    for x0, x1 in pad_ranges:
-        axs[2].axvspan(x0, x1, color='lightgreen', alpha=0.7,
-                       label='Color Pad' if x0 == pad_ranges[0][0] else "")
-    axs[2].set_title("Absolute Derivative + Region Classification")
-    axs[2].legend(); axs[2].grid(True)
+        # 3: The strip image
+        axs[3].imshow(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+        axs[3].axis('off')
+        axs[3].set_title("Cropped Strip Image")
 
-    # 3: The strip image
-    axs[3].imshow(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
-    axs[3].axis('off')
-    axs[3].set_title("Cropped Strip Image")
+        #plt.tight_layout()
+        #plt.show()
 
-    #plt.tight_layout()
-    #plt.show()
-
-def startUrineTestAnalysis(msg):
-    ref_img_path, test_img_path, final_img_result_path, test_lib_path
-    # Split: "OR_startUrineTestAnalysis~ref~test~final~lib"
-    parts = msg.split("~")
-    if len(parts) != 5 or parts[0] != "OR_startUrineTestAnalysis":
-        print(f"[ERROR] Invalid urine msg format: {msg}")
+def startUrineTestAnalysis(ref_img_path, test_img_path, final_img_result_path_, test_lib_path):
+    # Validate paths
+    if not all(p.strip() for p in [
+        ref_img_path, test_img_path,
+        final_img_result_path_, test_lib_path
+    ]):
+        logger.info("[ERROR] Empty path received")
         return None
-        
-    ref_img_path, test_img_path, final_img_result_path, test_lib_path = parts[1:5]
-        
-    # Validate paths (basic checks)
-    if not all(path.strip() for path in parts[1:5]):
-        print(f"[ERROR] Empty path in urine msg: {msg}")
-        return None
-        
-    # Read test image
+    
+    global final_img_result_path
+    final_img_result_path = final_img_result_path_
+
     test_img = cv2.imread(test_img_path)
-
     if test_img is None:
-        print(f"Failed to read image at path: {test_img_path}")
-        return None, None
+        logger.info(f"Failed to read image: {test_img_path}")
+        return None
 
-    # Load test library JSON
     with open(test_lib_path, 'r') as file:
         data = json.load(file)
 
@@ -881,7 +920,7 @@ def startUrineTestAnalysis(msg):
     # Optional quit check
     key = cv2.waitKey(1) & 0xFF
     if key == ord('q'):
-        print("Stopped by user")
+        logger.info("Stopped by user")
         sys.exit()
 
     offset = 120
@@ -897,6 +936,7 @@ def startUrineTestAnalysis(msg):
     # Finding peaks
     merged_peaks, pad_ranges, blank_ranges = find_and_merge_peaks(
         R_nb, G_nb, B_nb, Y_nb,
+        image_width=test_img.shape[1],
         height_thresh=3,
         merge_distance=5
     )
@@ -913,17 +953,36 @@ def startUrineTestAnalysis(msg):
     # Convert RGB to LAB
     lab_colours = rgbtolab(pad_colours)
 
-    # Analyte computations
-    glucose = glucosecomp(lab_colours, data)
-    bilirubin = bilirubincomp(lab_colours, data)
-    ketones = ketonecomp(lab_colours, data)
-    specificgravity = sgcomp(lab_colours, data)
-    blood = bgcomp(lab_colours, data)
-    pH = phcomp(lab_colours, data)
-    protein = proteincomp(lab_colours, data)
-    urobilinogen = urocomp(lab_colours, data)
-    nitrites = nitritecomp(lab_colours, data)
-    leukocytes = leukocytescomp(lab_colours, data)
+    try:
+        glucose = glucosecomp(lab_colours, data)
+        bilirubin = bilirubincomp(lab_colours, data)
+        ketones = ketonecomp(lab_colours, data)
+        specificgravity = sgcomp(lab_colours, data)
+        blood = bgcomp(lab_colours, data)
+        pH = phcomp(lab_colours, data)
+        protein = proteincomp(lab_colours, data)
+        urobilinogen = urocomp(lab_colours, data)
+        nitrites = nitritecomp(lab_colours, data)
+        leukocytes = leukocytescomp(lab_colours, data)
+
+    except Exception as e:
+        result = {
+                "message":"Invalid test strip",
+                "status":"failed"
+        }
+
+        if _SEND_ASYNC is not None:
+            payload = json.dumps(result)
+            msg = f"OR_RESULT~{payload}"
+            logger.info("[DEBUG] Sending OR_RESULT to socket")
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(_SEND_ASYNC(msg))
+            except RuntimeError:
+                asyncio.run(_SEND_ASYNC(msg))
+        
+        logger.exception("Error during analyte computation")
+        raise  # Re-throw so Java side knows something failed
 
     # Final image formation
     final_image = finalimageformation(all_crops)
@@ -949,9 +1008,49 @@ def startUrineTestAnalysis(msg):
         "Glucose(GLU)": glucose,
         "pH": pH,
         "Specific Gravity(SG)": specificgravity,
-        "Leukocytes(LEU)": leukocytes
+        "Leukocytes(LEU)": leukocytes,
+        "status":"success",
+        "message" : "result generated successfully"
     }
 
-    print(result)
+    logger.info(result)
 
-    return result, final_image
+    if _SEND_ASYNC is not None:
+        payload = json.dumps(result)
+        msg = f"OR_RESULT~{payload}"
+        logger.info("[DEBUG] Sending OR_RESULT to socket")
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(_SEND_ASYNC(msg))
+        except RuntimeError:
+            asyncio.run(_SEND_ASYNC(msg))
+
+    
+    if DEBUGGING:
+        return result, final_image
+
+
+def main():
+    setup_logging()
+    logger = logging.getLogger(__name__)
+    
+    ref_img_path = r"C:\Users\Mangesh Sirkare\Downloads\Failed Urine Test Images\URINE_TEST_50sec.bmp"
+    test_img_path = r"C:\Users\Mangesh Sirkare\Downloads\Failed Urine Test Images\URINE_TEST_50sec.bmp"
+    final_img_result_path = r"C:\Users\Mangesh Sirkare\Downloads\Failed Urine Test Images\result.bmp"
+    test_lib_path = r"C:\usb\UT_Bhat_Biotech.json"
+
+    result = startUrineTestAnalysis(
+        ref_img_path,
+        test_img_path,
+        final_img_result_path,
+        test_lib_path
+    )
+
+    if result:
+        logger.info("Process completed.")
+    else:
+        logger.info("Process failed.")
+
+
+if __name__ == "__main__" and DEBUGGING:
+    main()
